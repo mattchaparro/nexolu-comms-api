@@ -1,0 +1,48 @@
+[project]
+name = "nexolu-comms-api"
+version = "0.1.0"
+description = "Nexolu Communications: envio de WhatsApp y correo centralizado para todo el ecosistema Nexolu (POS, Spa, EasyTickets, CRM y futuras aplicaciones)."
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "sqlalchemy>=2.0.36",
+    "aiosqlite>=0.20",
+    "aiomysql>=0.2",
+    "alembic>=1.14",
+    "httpx>=0.27",
+    "python-multipart>=0.0.12",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "pytest-httpx>=0.35",
+    "ruff>=0.7",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["nexolu_comms_api*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# DTZ: el servicio guarda timestamps como UTC "naive" a proposito (convencion
+# consistente en todo el modelo de datos, ver core/db/entities.py) para evitar
+# el problema de columnas DateTime aware/naive entre SQLite y MySQL.
+# B008: `Depends(...)` como valor por defecto es el patron idiomatico de
+# FastAPI, no una llamada accidental en tiempo de definicion.
+ignore = ["DTZ", "B008"]
