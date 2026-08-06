@@ -39,7 +39,15 @@ class WhatsAppTemplateIn(BaseModel):
 
 
 class SendRequest(BaseModel):
-    business_id: str
+    # Clave de particion OPACA que la app define para agrupar sus propios
+    # reportes de uso (ver GET /v1/usage/*) - este servicio nunca la valida
+    # contra nada propio, no tiene que significar "negocio" literal. Una app
+    # sin concepto de tenant (un solo cliente, sin sub-negocios) puede
+    # omitirla: cae al propio app_id, así toda su actividad queda bajo una
+    # sola particion en vez de fallar por falta de un dato que no le aplica.
+    business_id: str | None = Field(
+        default=None, description="Clave de particion para reportes de uso. Si se omite, cae al app_id de quien llama."
+    )
     # Identificador libre de la app llamante para agrupar/rastrear sus
     # propios envios (p.ej. "low_stock_alert:456") - este servicio no le da
     # significado, solo lo guarda.
@@ -65,7 +73,7 @@ class ChannelResultOut(BaseModel):
 
 class SendResponse(BaseModel):
     reference: str | None
-    business_id: str
+    business_id: str  # ya resuelto: nunca None en la respuesta, ver send_notification().
     results: list[ChannelResultOut]
 
 
@@ -87,6 +95,7 @@ async def send_notification(
     registry = get_channel_registry()
     repo = NotificationRepository(session)
     results: list[ChannelResultOut] = []
+    business_id = payload.business_id or app.app_id
 
     for channel_name in payload.channels:
         recipient = payload.to.get(channel_name)
@@ -94,7 +103,7 @@ async def send_notification(
 
         repo.log(
             app_id=app.app_id,
-            business_id=payload.business_id,
+            business_id=business_id,
             channel=channel_name,
             recipient=recipient or "",
             status=result.status,
@@ -115,7 +124,7 @@ async def send_notification(
 
     await session.commit()
 
-    return SendResponse(reference=payload.reference, business_id=payload.business_id, results=results)
+    return SendResponse(reference=payload.reference, business_id=business_id, results=results)
 
 
 async def _send_one(

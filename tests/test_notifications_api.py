@@ -21,6 +21,25 @@ def test_rejects_an_empty_channels_list(client, auth_headers):
     assert response.status_code == 422
 
 
+def test_business_id_is_optional_and_falls_back_to_the_apps_own_id(client, auth_headers, httpx_mock):
+    """Una app sin concepto propio de tenant (un solo cliente, sin
+    sub-negocios) puede omitir business_id por completo - no le tiene que
+    inventar un valor a un dato que no le aplica."""
+    httpx_mock.add_response(url="https://api.brevo.com/v3/smtp/email", json={"messageId": "<m1@brevo>"})
+
+    response = client.post(
+        "/v1/notifications/send",
+        headers=auth_headers,
+        json={"channels": ["email"], "to": {"email": "a@b.com"}, "subject": "Hola", "text": "hola"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["business_id"] == "pos"  # app_id de auth_headers
+
+    summary = client.get("/v1/usage/summary?business_id=pos", headers=auth_headers).json()
+    assert summary["summary"]["message_count"] == 1
+
+
 def test_sends_the_same_notification_over_two_channels_with_one_call(client, auth_headers, httpx_mock):
     httpx_mock.add_response(
         url="https://graph.facebook.com/v21.0/123456/messages", json={"messages": [{"id": "wamid.1"}]}

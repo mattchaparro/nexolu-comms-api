@@ -56,6 +56,13 @@ intenta y la respuesta trae un resultado por canal:
   el header `Authorization: Bearer <api_key>` autentica la llamada
   completa. Un segundo nivel, separado, es `NEXOLU_PLATFORM_API_KEY` -
   acceso de Nexolú al gasto agregado de TODAS las apps.
+- **`business_id` es una clave de partición opaca, no un dato propio de
+  POS**: este servicio nunca la valida contra nada suyo, solo la usa para
+  agrupar reportes de uso por app (`GET /v1/usage/*`). Una app con su propio
+  concepto de tenant (negocio, sede, cliente...) manda ese identificador
+  ahí; una app de un solo tenant puede omitirla por completo - cae al
+  `app_id` de quien llama, así toda su actividad queda bajo una sola
+  partición en vez de fallar por falta de un dato que no le aplica.
 - **Canales** (`core/channels/`): `ChannelSender` es el contrato común
   (`whatsapp.py`, `email.py`). Agregar un canal nuevo (SMS, push...) es
   escribir una clase que lo implemente y una línea en `registry.py` - nada
