@@ -33,6 +33,15 @@ class OutboundMessage:
     # marketing | utility | authentication | service - solo WhatsApp lo usa,
     # para estimar costo por categoria (Meta cobra distinto segun cual sea).
     category: str | None = None
+    # WhatsApp Flow (formulario nativo): confirma un borrador de escritura
+    # sin salir del canal. `flow_token` es responsabilidad de la app
+    # llamante (p.ej. el id de un borrador propio) - este servicio nunca lo
+    # interpreta, solo lo reenvia tal cual a Meta.
+    flow_id: str | None = None
+    flow_screen: str | None = None
+    flow_cta: str | None = None
+    flow_token: str | None = None
+    flow_data: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

@@ -18,11 +18,38 @@ class WhatsAppAppConfig(BaseModel):
     """Credenciales de WhatsApp Cloud API (Meta) de UNA app. Cada app tiene su
     propio numero/WABA - no se comparte uno solo entre todo el ecosistema,
     para que el negocio le hable a sus clientes desde el numero que ya
-    conocen y para que el gasto/limites de Meta queden segregados por app."""
+    conocen y para que el gasto/limites de Meta queden segregados por app.
+
+    Meta registra el webhook a nivel de App/WABA, no por numero de telefono
+    - por eso el webhook tambien es por app, no por negocio dentro de una
+    app (ver GET/POST /webhooks/whatsapp/{app_id}). Tres secretos distintos,
+    con dueños distintos:
+
+    - `webhook_verify_token`: lo elige quien configura el webhook en el
+      dashboard de Meta: Meta lo devuelve en el handshake GET para probar
+      que quien pide suscribirse es el mismo que lo registro.
+    - `meta_app_secret`: App Secret del dashboard de Meta (NO el access
+      token). Verifica `X-Hub-Signature-256` en cada POST - prueba que el
+      evento de verdad vino de Meta, no de un tercero que le pego a esta
+      URL. Opcional: sin el, se salta esa verificacion (con warning en el
+      log), no se bloquea el webhook completo por un dato que no todas las
+      apps van a tener configurado desde el primer dia.
+    - `callback_secret`: propio de este servicio (nunca lo ve Meta). Firma
+      cada evento que se reenvia a `callback_url`, mismo patron HMAC que ya
+      usa Nexolu Payments Core con sus apps cliente.
+    """
 
     phone_number_id: str
     access_token: str
     waba_id: str | None = None
+    webhook_verify_token: str | None = None
+    meta_app_secret: str | None = None
+    callback_secret: str | None = None
+    # A donde se reenvia (firmado) cada evento entrante de esta app - este
+    # servicio NUNCA interpreta el mensaje (texto, respuesta de Flow, etc.),
+    # solo verifica la firma de Meta y lo reenvia intacto. Ver
+    # core/webhooks/whatsapp.py.
+    callback_url: str | None = None
 
 
 class EmailAppConfig(BaseModel):

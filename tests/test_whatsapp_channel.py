@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from nexolu_comms_api.config import EmailAppConfig, WhatsAppAppConfig, get_settings
 from nexolu_comms_api.core.auth.apps import AppIdentity
 from nexolu_comms_api.core.channels.base import OutboundMessage
@@ -63,6 +65,36 @@ async def test_sends_a_template_and_estimates_cost_by_category(httpx_mock):
 
     assert result.status == "sent"
     assert result.cost_micros == get_settings().whatsapp_rate_utility_micros
+
+
+async def test_sends_a_flow_with_the_data_and_flow_token_untouched(httpx_mock):
+    httpx_mock.add_response(json={"messages": [{"id": "wamid.flow1"}]})
+    channel = WhatsAppChannel(get_settings())
+    app = _app(WhatsAppAppConfig(phone_number_id="123", access_token="tok"))
+
+    result = await channel.send(
+        app,
+        OutboundMessage(
+            to="+573001234567",
+            text="Confirma los datos del gasto:",
+            flow_id="9988",
+            flow_screen="GASTO",
+            flow_cta="Confirmar",
+            flow_token="draft-abc-123",
+            flow_data={"concepto": "Arriendo", "monto": 50000},
+        ),
+    )
+
+    assert result.status == "sent"
+    assert result.provider_message_id == "wamid.flow1"
+
+    request = httpx_mock.get_requests()[0]
+    body = json.loads(request.content)
+    assert body["interactive"]["type"] == "flow"
+    assert body["interactive"]["action"]["parameters"]["flow_id"] == "9988"
+    assert body["interactive"]["action"]["parameters"]["flow_token"] == "draft-abc-123"
+    assert body["interactive"]["action"]["parameters"]["flow_action_payload"]["screen"] == "GASTO"
+    assert body["interactive"]["action"]["parameters"]["flow_action_payload"]["data"]["monto"] == 50000
 
 
 async def test_reports_the_meta_error_message_on_rejection(httpx_mock):

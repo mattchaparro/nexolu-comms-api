@@ -40,6 +40,40 @@ def test_business_id_is_optional_and_falls_back_to_the_apps_own_id(client, auth_
     assert summary["summary"]["message_count"] == 1
 
 
+def test_sends_a_whatsapp_flow(client, auth_headers, httpx_mock):
+    httpx_mock.add_response(
+        url="https://graph.facebook.com/v21.0/123456/messages", json={"messages": [{"id": "wamid.flow1"}]}
+    )
+
+    response = client.post(
+        "/v1/notifications/send",
+        headers=auth_headers,
+        json={
+            "business_id": "42",
+            "channels": ["whatsapp"],
+            "to": {"whatsapp": "+573001234567"},
+            "text": "Confirma los datos del gasto:",
+            "whatsapp_flow": {
+                "flow_id": "9988",
+                "screen": "GASTO",
+                "cta": "Confirmar",
+                "flow_token": "draft-abc-123",
+                "data": {"concepto": "Arriendo", "monto": 50000},
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    result = response.json()["results"][0]
+    assert result["status"] == "sent"
+    assert result["provider_message_id"] == "wamid.flow1"
+
+    import json
+
+    sent_body = json.loads(httpx_mock.get_requests()[0].content)
+    assert sent_body["interactive"]["action"]["parameters"]["flow_token"] == "draft-abc-123"
+
+
 def test_sends_the_same_notification_over_two_channels_with_one_call(client, auth_headers, httpx_mock):
     httpx_mock.add_response(
         url="https://graph.facebook.com/v21.0/123456/messages", json={"messages": [{"id": "wamid.1"}]}

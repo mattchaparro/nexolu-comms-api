@@ -82,6 +82,18 @@ intenta y la respuesta trae un resultado por canal:
   configurables). Email queda con costo desconocido (`cost_micros: null`,
   no `0`): Brevo no lo informa por envío y la mayoría de planes son por
   volumen, no por mensaje.
+- **Webhook entrante, uno por app (no por negocio dentro de una app)**:
+  Meta registra el webhook a nivel de App/WABA, no por número de teléfono -
+  así que el patrón correcto no es "un webhook por negocio", es "un webhook
+  por app integradora" (`GET/POST /webhooks/whatsapp/{app_id}`). Este
+  servicio **nunca interpreta** el evento entrante (texto, respuesta de un
+  Flow, etc.) - eso sigue siendo lógica de cada app. Lo que hace es: (1)
+  verificar que el evento vino de verdad de Meta (`X-Hub-Signature-256`,
+  con el App Secret de esa app), (2) responderle 200 a Meta de inmediato, y
+  (3) reenviar el payload crudo, firmado con HMAC propio
+  (`X-Nexolu-Timestamp`/`X-Nexolu-Signature`, mismo esquema que ya usa
+  Nexolu Payments Core), al `callback_url` que esa app registró. Sin cola
+  ni reintento todavía - ver limitaciones abajo.
 
 ## Endpoints
 
@@ -90,9 +102,12 @@ intenta y la respuesta trae un resultado por canal:
 | `GET` | `/health` | Liveness check. |
 | `GET` | `/v1/channels` | Lista los canales disponibles. |
 | `POST` | `/v1/notifications/send` | Envía por uno o varios canales en una sola llamada. |
+| `POST` | `/v1/whatsapp/read-receipt` | Marca un mensaje entrante como leído + activa "escribiendo...". |
 | `GET` | `/v1/usage/summary` | Gasto propio de la app (opcional: por negocio/canal). |
 | `GET` | `/v1/usage/daily` | Serie diaria del gasto propio. |
 | `GET` | `/v1/platform/usage` | Gasto de TODAS las apps (requiere `NEXOLU_PLATFORM_API_KEY`). |
+| `GET` | `/webhooks/whatsapp/{app_id}` | Handshake de verificación de Meta. |
+| `POST` | `/webhooks/whatsapp/{app_id}` | Recibe un evento de Meta y lo reenvía firmado al `callback_url` de esa app. |
 
 Contrato completo, con ejemplos: `GET /docs` (Swagger) una vez el servicio
 esté corriendo.
@@ -130,6 +145,10 @@ ruff check .
 - **Sin gestión de plantillas de WhatsApp**: este servicio *envía*
   plantillas ya aprobadas en Meta, no las crea ni las administra - eso
   sigue siendo un paso manual en el dashboard de Meta por app.
+- **Reenvío de webhooks sin cola ni reintento**: si el `callback_url` de
+  una app no responde, el evento se pierde (queda logueado, no
+  persistido). Para v1 es aceptable - agregar reintento con backoff es un
+  cambio localizado en `api/webhooks.py::_forward()` el día que haga falta.
 - **Costo de email desconocido**: no hay tarifa por mensaje configurada
   para Brevo (ver arriba). Si en el futuro se necesita, es un campo más en
   `EmailAppConfig`/`Settings`, mismo patrón que WhatsApp.

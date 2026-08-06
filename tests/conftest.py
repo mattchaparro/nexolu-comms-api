@@ -27,7 +27,14 @@ def app_env(tmp_path, monkeypatch):
                 "pos": {
                     "api_key": POS_API_KEY,
                     "name": "Nexolu POS",
-                    "whatsapp": {"phone_number_id": "123456", "access_token": "wa-token"},
+                    "whatsapp": {
+                        "phone_number_id": "123456",
+                        "access_token": "wa-token",
+                        "webhook_verify_token": "verify-me",
+                        "meta_app_secret": "meta-app-secret",
+                        "callback_url": "https://pos.nexolu.test/webhooks/nexolu-comms/whatsapp",
+                        "callback_secret": "pos-callback-secret",
+                    },
                     "email": {"from_email": "no-reply@pos.nexolu.co", "from_name": "Nexolu POS"},
                 }
             }

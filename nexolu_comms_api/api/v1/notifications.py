@@ -38,6 +38,21 @@ class WhatsAppTemplateIn(BaseModel):
     components: list[dict] = Field(default_factory=list)
 
 
+class WhatsAppFlowIn(BaseModel):
+    """Formulario nativo de WhatsApp, para confirmar un borrador de
+    escritura sin salir del canal - ver App\\Jobs\\ProcessWhatsAppFlowReply
+    en Nexolu POS. `flow_token` es responsabilidad de la app llamante (p.ej.
+    el id de un borrador propio en su servicio de IA); este servicio nunca
+    lo interpreta, solo lo reenvia tal cual a Meta y lo recibe de vuelta sin
+    tocarlo cuando el usuario responde (ver GET/POST /webhooks/whatsapp)."""
+
+    flow_id: str
+    screen: str
+    cta: str
+    flow_token: str
+    data: dict = Field(default_factory=dict)
+
+
 class SendRequest(BaseModel):
     # Clave de particion OPACA que la app define para agrupar sus propios
     # reportes de uso (ver GET /v1/usage/*) - este servicio nunca la valida
@@ -61,6 +76,7 @@ class SendRequest(BaseModel):
         default=None, description="Categoria de plantilla de WhatsApp: marketing|utility|authentication|service."
     )
     whatsapp_template: WhatsAppTemplateIn | None = None
+    whatsapp_flow: WhatsAppFlowIn | None = None
 
 
 class ChannelResultOut(BaseModel):
@@ -141,6 +157,7 @@ async def _send_one(
     except UnknownChannelError as exc:
         return ChannelSendResult(status=STATUS_FAILED, error=str(exc))
 
+    flow = payload.whatsapp_flow
     message = OutboundMessage(
         to=recipient,
         subject=payload.subject,
@@ -150,6 +167,11 @@ async def _send_one(
         template_name=payload.whatsapp_template.name if payload.whatsapp_template else None,
         template_language=payload.whatsapp_template.language if payload.whatsapp_template else None,
         template_components=payload.whatsapp_template.components if payload.whatsapp_template else [],
+        flow_id=flow.flow_id if flow else None,
+        flow_screen=flow.screen if flow else None,
+        flow_cta=flow.cta if flow else None,
+        flow_token=flow.flow_token if flow else None,
+        flow_data=flow.data if flow else {},
     )
 
     try:

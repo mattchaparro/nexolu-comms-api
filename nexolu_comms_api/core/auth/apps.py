@@ -23,11 +23,14 @@ class AppIdentity:
 
 
 class AppRegistry:
-    """Resuelve una API key a la identidad de la app que la presento."""
+    """Resuelve una API key (llamadas salientes de una app) o un app_id
+    (webhooks entrantes de Meta, que no traen ninguna API key nuestra - ver
+    core/webhooks/whatsapp.py) a la identidad de la app."""
 
     def __init__(self, settings: Settings | None = None) -> None:
         settings = settings or get_settings()
         self._by_api_key: dict[str, AppIdentity] = {}
+        self._by_app_id: dict[str, AppIdentity] = {}
 
         for app_id, registration in settings.apps.items():
             identity = AppIdentity(
@@ -38,9 +41,13 @@ class AppRegistry:
                 email=registration.email,
             )
             self._by_api_key[registration.api_key] = identity
+            self._by_app_id[app_id] = identity
 
     def resolve_by_api_key(self, api_key: str) -> AppIdentity | None:
         return self._by_api_key.get(api_key)
+
+    def resolve_by_app_id(self, app_id: str) -> AppIdentity | None:
+        return self._by_app_id.get(app_id)
 
 
 _registry: AppRegistry | None = None
