@@ -51,11 +51,20 @@ intenta y la respuesta trae un resultado por canal:
 
 ## Arquitectura
 
-- **Auth**: cada app cliente (POS, Spa, ...) tiene una API key, registrada
-  en `NEXOLU_APPS_JSON` (ver `.env.example`). Sin sesión de usuario final:
-  el header `Authorization: Bearer <api_key>` autentica la llamada
-  completa. Un segundo nivel, separado, es `NEXOLU_PLATFORM_API_KEY` -
-  acceso de Nexolú al gasto agregado de TODAS las apps.
+- **Auth**: cada app cliente (POS, Spa, ...) tiene una API key. Sin sesión
+  de usuario final: el header `Authorization: Bearer <api_key>` autentica la
+  llamada completa. Un segundo nivel, separado, es `NEXOLU_PLATFORM_API_KEY`
+  - acceso de Nexolú al gasto agregado de TODAS las apps, a los logs de
+  envíos de todas las apps (`GET /v1/platform/notifications`) y a la gestión
+  de apps/credenciales de proveedor (`/v1/admin/apps/*`, ver más abajo).
+- **Apps y credenciales de proveedor, persistidas en BD**: `comms_apps` +
+  `provider_credentials` (cifrado Fernet, `COMMS_MASTER_KEY` - ver
+  `core/security/crypto.py`), gestionables vía `/v1/admin/apps/*`
+  (protegido por `NEXOLU_PLATFORM_API_KEY`). `NEXOLU_APPS_JSON` sigue
+  existiendo como fallback de transición mientras
+  `scripts/migrate_apps_json_to_db.py` no haya corrido en un ambiente
+  (ver `core/auth/apps.py`) - una vez migrados todos los ambientes, ese
+  fallback y la variable se eliminan.
 - **`business_id` es una clave de partición opaca, no un dato propio de
   POS**: este servicio nunca la valida contra nada suyo, solo la usa para
   agrupar reportes de uso por app (`GET /v1/usage/*`). Una app con su propio
@@ -106,8 +115,16 @@ intenta y la respuesta trae un resultado por canal:
 | `GET` | `/v1/usage/summary` | Gasto propio de la app (opcional: por negocio/canal). |
 | `GET` | `/v1/usage/daily` | Serie diaria del gasto propio. |
 | `GET` | `/v1/platform/usage` | Gasto de TODAS las apps (requiere `NEXOLU_PLATFORM_API_KEY`). |
+| `GET` | `/v1/platform/notifications` | Log de envíos de TODAS las apps, filtrable y paginado (requiere `NEXOLU_PLATFORM_API_KEY`). |
 | `GET` | `/webhooks/whatsapp/{app_id}` | Handshake de verificación de Meta. |
 | `POST` | `/webhooks/whatsapp/{app_id}` | Recibe un evento de Meta y lo reenvía firmado al `callback_url` de esa app. |
+| `GET`/`POST` | `/v1/admin/apps` | Lista/crea apps (requiere `NEXOLU_PLATFORM_API_KEY`). |
+| `PATCH` | `/v1/admin/apps/{app_id}` | Edita nombre/estado de una app. |
+| `POST` | `/v1/admin/apps/{app_id}/regenerate-key` | Regenera la api_key de una app (overwrite inmediato). |
+| `GET`/`POST` | `/v1/admin/apps/{app_id}/providers/meta-whatsapp` | Consulta/configura credenciales de WhatsApp Cloud API. |
+| `GET` | `/v1/admin/apps/{app_id}/providers/meta-whatsapp/secrets` | Revela las credenciales de WhatsApp en claro. |
+| `GET`/`POST` | `/v1/admin/apps/{app_id}/providers/brevo` | Consulta/configura credenciales de Brevo. |
+| `GET` | `/v1/admin/apps/{app_id}/providers/brevo/secrets` | Revela la API key de Brevo en claro. |
 
 Contrato completo, con ejemplos: `GET /docs` (Swagger) una vez el servicio
 esté corriendo.
@@ -118,7 +135,7 @@ esté corriendo.
 python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-cp .env.example .env  # completar NEXOLU_APPS_JSON con al menos una app de prueba
+cp .env.example .env  # completar NEXOLU_APPS_JSON con al menos una app de prueba y generar COMMS_MASTER_KEY
 
 uvicorn nexolu_comms_api.main:app --reload --port 8010
 ```
@@ -128,6 +145,14 @@ Las tablas se crean solas al arrancar cuando `DATABASE_URL` es SQLite (ver
 
 ```bash
 alembic upgrade head
+```
+
+Para migrar las apps/credenciales que hoy viven en `NEXOLU_APPS_JSON` hacia
+`comms_apps`/`provider_credentials` (idempotente, no genera api_keys
+nuevas):
+
+```bash
+python scripts/migrate_apps_json_to_db.py
 ```
 
 ### Tests

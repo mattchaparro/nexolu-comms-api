@@ -14,6 +14,7 @@ from datetime import date
 
 from sqlalchemy import Date, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql import ColumnElement
 
 from nexolu_comms_api.core.db.entities import Notification
 
@@ -50,6 +51,49 @@ class NotificationRepository:
         )
         self._session.add(notification)
         return notification
+
+    async def list_notifications(
+        self,
+        *,
+        app_id: str | None,
+        business_id: str | None,
+        channel: str | None,
+        status: str | None,
+        reference: str | None,
+        date_from: date | None,
+        date_to: date | None,
+        limit: int,
+        offset: int,
+    ) -> tuple[Sequence[Notification], int]:
+        """Listado paginado para el panel de logs del Admin - a diferencia de
+        las agregaciones de arriba, aca se devuelve la fila completa (no un
+        rollup), mas el total sin paginar para que el frontend pueda armar
+        controles de paginacion."""
+        conditions: list[ColumnElement[bool]] = []
+        if app_id is not None:
+            conditions.append(Notification.app_id == app_id)
+        if business_id is not None:
+            conditions.append(Notification.business_id == business_id)
+        if channel is not None:
+            conditions.append(Notification.channel == channel)
+        if status is not None:
+            conditions.append(Notification.status == status)
+        if reference is not None:
+            conditions.append(Notification.reference == reference)
+        if date_from is not None:
+            conditions.append(func.date(Notification.created_at, type_=Date) >= date_from)
+        if date_to is not None:
+            conditions.append(func.date(Notification.created_at, type_=Date) <= date_to)
+
+        query = select(Notification).order_by(Notification.created_at.desc()).limit(limit).offset(offset)
+        count_query = select(func.count(Notification.id))
+        for condition in conditions:
+            query = query.where(condition)
+            count_query = count_query.where(condition)
+
+        rows = (await self._session.execute(query)).scalars().all()
+        total = (await self._session.execute(count_query)).scalar_one()
+        return rows, total
 
     async def usage_daily_series(
         self,

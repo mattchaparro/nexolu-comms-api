@@ -15,18 +15,23 @@ from __future__ import annotations
 
 import hmac
 
-from fastapi import Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, status
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexolu_comms_api.config import get_settings
-from nexolu_comms_api.core.auth.apps import AppIdentity, get_app_registry
+from nexolu_comms_api.core.auth.apps import AppIdentity, resolve_by_api_key
+from nexolu_comms_api.core.db.session import get_session
 
 
-async def get_current_app(authorization: str | None = Header(default=None)) -> AppIdentity:
+async def get_current_app(
+    authorization: str | None = Header(default=None),
+    session: AsyncSession = Depends(get_session),
+) -> AppIdentity:
     if not authorization or not authorization.lower().startswith("bearer "):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Falta el header Authorization.")
 
     api_key = authorization.split(" ", 1)[1].strip()
-    app = get_app_registry().resolve_by_api_key(api_key)
+    app = await resolve_by_api_key(session, api_key)
 
     if app is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="API key invalida.")

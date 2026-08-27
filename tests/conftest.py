@@ -11,15 +11,19 @@ from __future__ import annotations
 import json
 
 import pytest
+from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
 POS_API_KEY = "dev-pos-key"
+TEST_COMMS_MASTER_KEY = Fernet.generate_key().decode()
+TEST_PLATFORM_API_KEY = "platform-key"
 
 
 @pytest.fixture(autouse=True)
 def app_env(tmp_path, monkeypatch):
     db_path = tmp_path / "test.db"
     monkeypatch.setenv("DATABASE_URL", f"sqlite+aiosqlite:///{db_path}")
+    monkeypatch.setenv("COMMS_MASTER_KEY", TEST_COMMS_MASTER_KEY)
     monkeypatch.setenv(
         "NEXOLU_APPS_JSON",
         json.dumps(
@@ -40,7 +44,7 @@ def app_env(tmp_path, monkeypatch):
             }
         ),
     )
-    monkeypatch.setenv("NEXOLU_PLATFORM_API_KEY", "platform-key")
+    monkeypatch.setenv("NEXOLU_PLATFORM_API_KEY", TEST_PLATFORM_API_KEY)
     monkeypatch.setenv("BREVO_API_KEY", "platform-brevo-key")
 
     _clear_caches()
@@ -53,12 +57,14 @@ def _clear_caches() -> None:
     from nexolu_comms_api.config import get_settings
     from nexolu_comms_api.core.channels.registry import get_channel_registry
     from nexolu_comms_api.core.db.session import get_engine, get_sessionmaker
+    from nexolu_comms_api.core.security.crypto import _fernet
 
     get_settings.cache_clear()
     get_engine.cache_clear()
     get_sessionmaker.cache_clear()
     get_channel_registry.cache_clear()
-    apps_module._registry = None
+    _fernet.cache_clear()
+    apps_module._legacy = None
 
 
 @pytest.fixture
@@ -72,3 +78,8 @@ def client(app_env):
 @pytest.fixture
 def auth_headers():
     return {"Authorization": f"Bearer {POS_API_KEY}"}
+
+
+@pytest.fixture
+def platform_headers():
+    return {"Authorization": f"Bearer {TEST_PLATFORM_API_KEY}"}

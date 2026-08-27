@@ -16,10 +16,12 @@ from __future__ import annotations
 import logging
 
 import httpx
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexolu_comms_api.config import Settings, get_settings
-from nexolu_comms_api.core.auth.apps import AppIdentity, get_app_registry
+from nexolu_comms_api.core.auth.apps import AppIdentity, resolve_by_app_id
+from nexolu_comms_api.core.db.session import get_session
 from nexolu_comms_api.core.webhooks.signing import build_forward_headers, verify_meta_signature
 
 router = APIRouter(prefix="/webhooks/whatsapp", tags=["webhooks"])
@@ -27,8 +29,8 @@ logger = logging.getLogger(__name__)
 
 
 @router.get("/{app_id}")
-async def verify(app_id: str, request: Request) -> Response:
-    identity = _resolve(app_id)
+async def verify(app_id: str, request: Request, session: AsyncSession = Depends(get_session)) -> Response:
+    identity = await _resolve(session, app_id)
 
     mode = request.query_params.get("hub.mode")
     token = request.query_params.get("hub.verify_token")
@@ -45,8 +47,13 @@ async def verify(app_id: str, request: Request) -> Response:
 
 
 @router.post("/{app_id}")
-async def receive_event(app_id: str, request: Request, background_tasks: BackgroundTasks) -> dict[str, bool]:
-    identity = _resolve(app_id)
+async def receive_event(
+    app_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, bool]:
+    identity = await _resolve(session, app_id)
     if identity is None or identity.whatsapp is None:
         raise HTTPException(status_code=404, detail="App desconocida o sin WhatsApp configurado.")
 
@@ -70,8 +77,8 @@ async def receive_event(app_id: str, request: Request, background_tasks: Backgro
     return {"ok": True}
 
 
-def _resolve(app_id: str) -> AppIdentity | None:
-    return get_app_registry().resolve_by_app_id(app_id)
+async def _resolve(session: AsyncSession, app_id: str) -> AppIdentity | None:
+    return await resolve_by_app_id(session, app_id)
 
 
 async def _forward(identity: AppIdentity, body: bytes, settings: Settings) -> None:

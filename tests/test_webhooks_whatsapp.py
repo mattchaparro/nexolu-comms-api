@@ -105,7 +105,7 @@ def test_receive_skips_verification_when_no_meta_app_secret_is_configured(client
     from nexolu_comms_api.config import get_settings
 
     get_settings.cache_clear()
-    apps_module._registry = None
+    apps_module._legacy = None
 
     response = client.post("/webhooks/whatsapp/pos", json={"entry": []})
 

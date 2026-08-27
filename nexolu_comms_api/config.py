@@ -122,6 +122,12 @@ class Settings(BaseSettings):
 
     log_level: str = "INFO"
 
+    # Cifra en reposo las credenciales de `CommsApp`/`ProviderCredential`
+    # (BD) - ver core/security/crypto.py. Vacia por defecto = ese modulo
+    # falla cerrado (RuntimeError) en el primer intento de leer/escribir una
+    # credencial, nunca un fallback a texto plano.
+    comms_master_key: str = ""
+
     @property
     def apps(self) -> dict[str, AppRegistration]:
         raw = json.loads(self.nexolu_apps_json or "{}")

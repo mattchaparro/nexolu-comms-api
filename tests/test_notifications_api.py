@@ -160,7 +160,7 @@ def test_a_channel_not_configured_for_the_app_is_reported_as_skipped(client, aut
     from nexolu_comms_api.config import get_settings
 
     get_settings.cache_clear()
-    apps_module._registry = None
+    apps_module._legacy = None
 
     response = client.post(
         "/v1/notifications/send",

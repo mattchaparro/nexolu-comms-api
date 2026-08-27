@@ -36,7 +36,7 @@ def test_skipped_when_the_app_has_no_whatsapp_configured(client, monkeypatch):
     from nexolu_comms_api.config import get_settings
 
     get_settings.cache_clear()
-    apps_module._registry = None
+    apps_module._legacy = None
 
     response = client.post(
         "/v1/whatsapp/read-receipt",

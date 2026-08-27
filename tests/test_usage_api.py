@@ -95,3 +95,59 @@ def test_platform_usage_filtered_to_an_app_breaks_down_by_business(client, auth_
 
     by_business = {row["key"]: row["message_count"] for row in response.json()["breakdown"]}
     assert by_business == {"1": 1, "2": 1}
+
+
+def test_platform_notifications_requires_the_platform_key(client, auth_headers, httpx_mock):
+    _send_email(client, auth_headers, httpx_mock, business_id="1")
+
+    assert client.get("/v1/platform/notifications").status_code == 401
+    assert client.get("/v1/platform/notifications", headers=auth_headers).status_code == 401
+
+
+def test_platform_notifications_lists_every_app(client, auth_headers, httpx_mock):
+    _send_email(client, auth_headers, httpx_mock, business_id="1", reference="ref-1")
+
+    response = client.get("/v1/platform/notifications", headers={"Authorization": "Bearer platform-key"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 1
+    row = body["notifications"][0]
+    assert row["app_id"] == "pos"
+    assert row["business_id"] == "1"
+    assert row["reference"] == "ref-1"
+    assert row["channel"] == "email"
+    assert row["status"] == "sent"
+
+
+def test_platform_notifications_filters_by_status_and_business(client, auth_headers, httpx_mock):
+    _send_email(client, auth_headers, httpx_mock, business_id="1")
+    _send_email(client, auth_headers, httpx_mock, business_id="2")
+
+    response = client.get(
+        "/v1/platform/notifications?business_id=2", headers={"Authorization": "Bearer platform-key"}
+    )
+
+    body = response.json()
+    assert body["total"] == 1
+    assert body["notifications"][0]["business_id"] == "2"
+
+    response = client.get(
+        "/v1/platform/notifications?status=failed", headers={"Authorization": "Bearer platform-key"}
+    )
+    assert response.json()["total"] == 0
+
+
+def test_platform_notifications_paginates(client, auth_headers, httpx_mock):
+    _send_email(client, auth_headers, httpx_mock, business_id="1")
+    _send_email(client, auth_headers, httpx_mock, business_id="2")
+
+    response = client.get(
+        "/v1/platform/notifications?limit=1&offset=0", headers={"Authorization": "Bearer platform-key"}
+    )
+
+    body = response.json()
+    assert body["total"] == 2
+    assert len(body["notifications"]) == 1
+    assert body["limit"] == 1
+    assert body["offset"] == 0

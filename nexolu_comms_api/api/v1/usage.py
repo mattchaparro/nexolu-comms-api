@@ -6,10 +6,12 @@
   negocio y/o canal puntual.
 - `GET /v1/platform/usage`: Nexolu ve el gasto de TODAS las apps
   (autenticada con NEXOLU_PLATFORM_API_KEY, nunca entregada a una app).
+- `GET /v1/platform/notifications`: Nexolu lista/filtra el detalle crudo de
+  envios de TODAS las apps (panel de logs del Admin) - misma auth que arriba.
 """
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
@@ -58,6 +60,27 @@ class UsageDailyResponse(BaseModel):
     business_id: str | None
     channel: str | None
     days: list[UsageDailyPointOut]
+
+
+class NotificationOut(BaseModel):
+    id: str
+    app_id: str
+    business_id: str
+    reference: str | None
+    channel: str
+    recipient: str
+    status: str
+    provider_message_id: str | None
+    error: str | None
+    cost_micros: int | None
+    created_at: datetime
+
+
+class NotificationListOut(BaseModel):
+    notifications: list[NotificationOut]
+    total: int
+    limit: int
+    offset: int
 
 
 class PlatformUsageResponse(BaseModel):
@@ -146,4 +169,40 @@ async def platform_usage(
         date_from=start,
         date_to=end,
         breakdown=[UsageBreakdownOut(key=r.key, **r.summary.__dict__) for r in rows],
+    )
+
+
+@router.get(
+    "/platform/notifications", response_model=NotificationListOut, dependencies=[Depends(require_platform_access)]
+)
+async def platform_notifications(
+    app_id: str | None = Query(default=None),
+    business_id: str | None = Query(default=None),
+    channel: str | None = Query(default=None),
+    status_filter: str | None = Query(default=None, alias="status"),
+    reference: str | None = Query(default=None),
+    date_from: date | None = Query(default=None),
+    date_to: date | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    session: AsyncSession = Depends(get_session),
+) -> NotificationListOut:
+    repository = NotificationRepository(session)
+    rows, total = await repository.list_notifications(
+        app_id=app_id,
+        business_id=business_id,
+        channel=channel,
+        status=status_filter,
+        reference=reference,
+        date_from=date_from,
+        date_to=date_to,
+        limit=limit,
+        offset=offset,
+    )
+
+    return NotificationListOut(
+        notifications=[NotificationOut.model_validate(row, from_attributes=True) for row in rows],
+        total=total,
+        limit=limit,
+        offset=offset,
     )
