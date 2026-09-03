@@ -28,7 +28,22 @@ class Base(DeclarativeBase):
 @lru_cache
 def get_engine() -> AsyncEngine:
     settings: Settings = get_settings()
-    return create_async_engine(settings.database_url, echo=False)
+    return create_async_engine(
+        settings.database_url,
+        echo=False,
+        # MySQL cierra las conexiones ociosas por su cuenta (`wait_timeout`),
+        # y el pool no se entera: la siguiente peticion recibe una conexion
+        # muerta y revienta con "Lost connection to MySQL server during
+        # query". Se vio en produccion como un 500 en la PRIMERA peticion
+        # despues de un rato quieto -- que en un webhook es una entrega
+        # perdida, y al crear un link de pago es un comprador que no puede
+        # pagar.
+        #
+        # `pool_pre_ping` gasta un SELECT 1 antes de entregar la conexion;
+        # `pool_recycle` la descarta antes de que MySQL alcance a hacerlo.
+        pool_pre_ping=True,
+        pool_recycle=1800,
+    )
 
 
 @lru_cache
