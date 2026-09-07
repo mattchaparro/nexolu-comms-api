@@ -20,7 +20,13 @@ from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nexolu_comms_api.config import EmailAppConfig, Settings, WhatsAppAppConfig, get_settings
+from nexolu_comms_api.config import (
+    EmailAppConfig,
+    InstagramAppConfig,
+    Settings,
+    WhatsAppAppConfig,
+    get_settings,
+)
 from nexolu_comms_api.core.auth.repository import CommsAppRepository, ProviderCredentialRepository
 from nexolu_comms_api.core.db.entities import CommsApp, ProviderCredential
 from nexolu_comms_api.core.security.api_keys import hash_api_key
@@ -35,6 +41,7 @@ class AppIdentity:
     name: str
     whatsapp: WhatsAppAppConfig | None
     email: EmailAppConfig | None
+    instagram: InstagramAppConfig | None = None
 
 
 def _whatsapp_config(credential: ProviderCredential) -> WhatsAppAppConfig:
@@ -46,6 +53,14 @@ def _whatsapp_config(credential: ProviderCredential) -> WhatsAppAppConfig:
         meta_app_secret=credential.secrets.get("meta_app_secret"),
         callback_secret=credential.secrets.get("callback_secret"),
         callback_url=credential.config.get("callback_url"),
+    )
+
+
+def _instagram_config(credential: ProviderCredential) -> InstagramAppConfig:
+    return InstagramAppConfig(
+        ig_user_id=credential.config["ig_user_id"],
+        access_token=credential.secrets["access_token"],
+        username=credential.config.get("username"),
     )
 
 
@@ -61,12 +76,22 @@ async def _build_identity(session: AsyncSession, app: CommsApp) -> AppIdentity:
     credentials = await ProviderCredentialRepository(session).list_for_app(app.id)
     whatsapp: WhatsAppAppConfig | None = None
     email: EmailAppConfig | None = None
+    instagram: InstagramAppConfig | None = None
     for credential in credentials:
         if credential.provider_slug == "meta_whatsapp":
             whatsapp = _whatsapp_config(credential)
         elif credential.provider_slug == "brevo":
             email = _email_config(credential)
-    return AppIdentity(app_id=app.app_id, api_key=app.api_key, name=app.name or app.app_id, whatsapp=whatsapp, email=email)
+        elif credential.provider_slug == "meta_instagram":
+            instagram = _instagram_config(credential)
+    return AppIdentity(
+        app_id=app.app_id,
+        api_key=app.api_key,
+        name=app.name or app.app_id,
+        whatsapp=whatsapp,
+        email=email,
+        instagram=instagram,
+    )
 
 
 async def resolve_by_api_key(session: AsyncSession, api_key: str) -> AppIdentity | None:

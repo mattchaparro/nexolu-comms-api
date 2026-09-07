@@ -25,6 +25,9 @@ from nexolu_comms_api.core.schemas import (
     BrevoIn,
     BrevoSecretsOut,
     BrevoStatusOut,
+    MetaInstagramIn,
+    MetaInstagramSecretsOut,
+    MetaInstagramStatusOut,
     MetaWhatsAppIn,
     MetaWhatsAppSecretsOut,
     MetaWhatsAppStatusOut,
@@ -94,6 +97,56 @@ async def get_meta_whatsapp_secrets(
             status_code=status.HTTP_404_NOT_FOUND, detail="Meta WhatsApp no esta configurado para esta app."
         )
     return MetaWhatsAppSecretsOut(**credential.secrets)
+
+
+# -- Meta Instagram (publicacion) ---------------------------------------------
+#
+# Separado de meta-whatsapp aunque el negocio sea el mismo: son credenciales
+# distintas, con permisos distintos, y una caduca (Instagram, 60 dias) y la
+# otra no. Meterlas juntas haria que rotar una obligara a repegar la otra.
+
+
+@router.post("/meta-instagram", response_model=MetaInstagramStatusOut, status_code=status.HTTP_201_CREATED)
+async def configure_meta_instagram(
+    app_id: str, payload: MetaInstagramIn, session: AsyncSession = Depends(get_session)
+) -> MetaInstagramStatusOut:
+    app = await _get_app_or_404(session, app_id)
+
+    credential = await ProviderCredentialRepository(session).upsert(
+        app_id=app.id,
+        provider_slug="meta_instagram",
+        config={"ig_user_id": payload.ig_user_id, "username": payload.username},
+        secrets={"access_token": payload.access_token},
+    )
+    await session.commit()
+
+    return MetaInstagramStatusOut(configured=True, **credential.config)
+
+
+@router.get("/meta-instagram", response_model=MetaInstagramStatusOut)
+async def get_meta_instagram_status(
+    app_id: str, session: AsyncSession = Depends(get_session)
+) -> MetaInstagramStatusOut:
+    app = await _get_app_or_404(session, app_id)
+    credential = await ProviderCredentialRepository(session).get_active(app.id, "meta_instagram")
+
+    if credential is None:
+        return MetaInstagramStatusOut(configured=False)
+    return MetaInstagramStatusOut(configured=True, **credential.config)
+
+
+@router.get("/meta-instagram/secrets", response_model=MetaInstagramSecretsOut)
+async def get_meta_instagram_secrets(
+    app_id: str, session: AsyncSession = Depends(get_session)
+) -> MetaInstagramSecretsOut:
+    app = await _get_app_or_404(session, app_id)
+    credential = await ProviderCredentialRepository(session).get_active(app.id, "meta_instagram")
+
+    if credential is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Instagram no esta configurado para esta app."
+        )
+    return MetaInstagramSecretsOut(**credential.secrets)
 
 
 # -- Brevo --------------------------------------------------------------------

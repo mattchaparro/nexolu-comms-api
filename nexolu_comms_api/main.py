@@ -6,7 +6,15 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from nexolu_comms_api.api import webhooks
-from nexolu_comms_api.api.v1 import admin_apps, admin_providers, health, notifications, usage, whatsapp
+from nexolu_comms_api.api.v1 import (
+    admin_apps,
+    admin_providers,
+    health,
+    instagram,
+    notifications,
+    usage,
+    whatsapp,
+)
 from nexolu_comms_api.config import get_settings
 from nexolu_comms_api.core.db.session import init_models
 from nexolu_comms_api.core.telemetry.logging import configure_logging
@@ -38,6 +46,7 @@ def create_app() -> FastAPI:
     app.include_router(notifications.router)
     app.include_router(usage.router)
     app.include_router(whatsapp.router)
+    app.include_router(instagram.router)
     app.include_router(webhooks.router)
     app.include_router(admin_apps.router)
     app.include_router(admin_providers.router)

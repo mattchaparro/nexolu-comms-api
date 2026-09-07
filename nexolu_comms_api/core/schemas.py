@@ -76,6 +76,36 @@ class MetaWhatsAppStatusOut(BaseModel):
     callback_url: str | None = None
 
 
+class MetaInstagramIn(BaseModel):
+    """Payload de POST .../providers/meta-instagram.
+
+    El token NO es el de WhatsApp aunque el negocio sea el mismo: publicar
+    en Instagram usa otro flujo de login y otros permisos
+    (`instagram_business_content_publish`). Y CADUCA: Meta emite tokens de
+    60 dias renovables, sin equivalente al token permanente de usuario del
+    sistema que si existe para WhatsApp. Si nadie lo renueva, publicar deja
+    de funcionar sin aviso.
+    """
+
+    ig_user_id: str
+    access_token: str
+    username: str | None = None
+
+
+class MetaInstagramStatusOut(BaseModel):
+    """Solo campos no secretos - nunca incluye access_token."""
+
+    configured: bool
+    ig_user_id: str | None = None
+    username: str | None = None
+
+
+class MetaInstagramSecretsOut(BaseModel):
+    """Reveal bajo demanda - endpoint separado de status, nunca inline."""
+
+    access_token: str
+
+
 class MetaWhatsAppSecretsOut(BaseModel):
     """Reveal bajo demanda - endpoint separado de status, nunca inline."""
 

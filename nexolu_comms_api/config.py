@@ -52,6 +52,24 @@ class WhatsAppAppConfig(BaseModel):
     callback_url: str | None = None
 
 
+class InstagramAppConfig(BaseModel):
+    """Credenciales de publicacion en Instagram de UNA app.
+
+    Separadas de las de WhatsApp aunque el negocio sea el mismo: son flujos
+    de login y permisos distintos (`instagram_business_content_publish` vs.
+    `whatsapp_business_messaging`), y el token de WhatsApp NO sirve aca.
+
+    Ese token ademas CADUCA -- Meta emite tokens de larga duracion de 60
+    dias, renovables. No hay equivalente al token permanente de usuario del
+    sistema que se usa para WhatsApp, asi que quien opere esto tiene que
+    acordarse de renovarlo o publicar dejara de funcionar sin aviso.
+    """
+
+    ig_user_id: str
+    access_token: str
+    username: str | None = None
+
+
 class EmailAppConfig(BaseModel):
     """Identidad de remitente de UNA app. `brevo_api_key` es opcional: sin
     ella, el envio usa la API key de Brevo de PLATAFORMA (ver
