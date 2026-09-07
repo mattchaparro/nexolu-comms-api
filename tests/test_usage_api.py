@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 
 def _send_email(client, auth_headers, httpx_mock, business_id="1", reference=None):
     httpx_mock.add_response(url="https://api.brevo.com/v3/smtp/email", json={"messageId": "<m@brevo>"})
@@ -15,6 +17,27 @@ def _send_email(client, auth_headers, httpx_mock, business_id="1", reference=Non
             "text": "hola",
         },
     )
+
+
+def test_el_rango_por_defecto_va_en_utc_no_en_la_hora_del_servidor(client, auth_headers, httpx_mock):
+    """De noche en America, la fecha UTC ya es la del dia siguiente.
+
+    `created_at` se guarda en UTC. Si el rango por defecto usara la fecha
+    LOCAL del servidor, de 19:00 a medianoche en Colombia lo recien enviado
+    caeria fuera del rango y el gasto del dia se veria en cero -- justo a la
+    hora en que cierra un local y alguien lo mira.
+
+    Esta prueba fallaba de verdad al correrla de noche, y pasaba de dia. Que
+    una suite dependa de la hora a la que se corre es peor que un fallo: se
+    ignora como "cosa rara" hasta que el mismo bug aparece en produccion.
+    """
+    _send_email(client, auth_headers, httpx_mock, business_id="1")
+
+    response = client.get("/v1/usage/summary", headers=auth_headers)
+
+    assert response.json()["summary"]["message_count"] == 1
+    # Y el rango que devuelve es el de UTC, no el del reloj de la maquina.
+    assert response.json()["date_to"] == datetime.now(UTC).date().isoformat()
 
 
 def test_usage_summary_requires_authorization(client):

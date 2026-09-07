@@ -11,7 +11,7 @@
 """
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
@@ -92,7 +92,19 @@ class PlatformUsageResponse(BaseModel):
 
 
 def _default_range(date_from: date | None, date_to: date | None) -> tuple[date, date]:
-    end = date_to or date.today()
+    """El rango por defecto, en UTC.
+
+    `date.today()` da la fecha del SERVIDOR, y `notifications.created_at` se
+    guarda en UTC (`datetime.utcnow`). En Colombia (UTC-5) eso significa que
+    de 19:00 a medianoche la fecha local va un dia atras de la UTC: lo que se
+    acaba de enviar queda FUERA del rango y el gasto del dia aparece en cero
+    -- justo cuando cierra un local y alguien lo mira.
+
+    Se resuelve del lado de la comparacion, no guardando fechas locales: el
+    servicio sirve a apps en varios husos y la unica fecha que significa lo
+    mismo para todas es la UTC.
+    """
+    end = date_to or datetime.now(UTC).date()
     start = date_from or (end - timedelta(days=DEFAULT_RANGE_DAYS - 1))
     return start, end
 
