@@ -95,7 +95,9 @@ class WhatsAppChannel(ChannelSender):
                 "whatsapp.send_rejected",
                 extra={"app_id": app.app_id, "status_code": response.status_code, "detail": detail},
             )
-            return None, ChannelSendResult(status=STATUS_FAILED, error=detail)
+            return None, ChannelSendResult(
+                status=STATUS_FAILED, error=detail, provider_status_code=response.status_code
+            )
 
         return response, None
 

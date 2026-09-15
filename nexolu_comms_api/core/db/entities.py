@@ -12,7 +12,17 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from nexolu_comms_api.core.db.session import Base
@@ -85,6 +95,173 @@ class ProviderCredential(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     app: Mapped[CommsApp] = relationship(back_populates="provider_credentials")
+
+
+class WebhookEvent(Base):
+    """Un evento entrante de Meta, persistido ANTES de responderle 200.
+
+    Existe porque el reenvio al `callback_url` de la app puede fallar (app
+    caida, deploy a medias, timeout) y hasta esta tabla el evento vivia solo
+    en memoria del BackgroundTask: si el reenvio fallaba, el evento se
+    perdia - y un webhook `order` perdido es una venta perdida. Ahora el
+    evento crudo queda en BD y un worker lo reintenta con backoff (ver
+    core/webhooks/forwarder.py) hasta entregarlo o declararlo `dead`.
+
+    `payload` es el CUERPO CRUDO tal cual llego (utf-8): la firma HMAC del
+    reenvio se calcula sobre esos bytes exactos, igual que el reenvio
+    inmediato de antes - re-serializar JSON cambiaria la firma.
+
+    `event_type`/`phone_number_id` son METADATOS para el panel (filtrar
+    "pedidos fallidos", enrutar por numero), no interpretacion de negocio:
+    el contenido sigue viajando intacto a la app duena.
+    """
+
+    __tablename__ = "webhook_events"
+    __table_args__ = (
+        Index("ix_webhook_events_retry", "forward_status", "next_retry_at"),
+        Index("ix_webhook_events_app", "app_id", "received_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    app_id: Mapped[str] = mapped_column(String(64))
+    # Presente solo para eventos que entraron por el webhook de PLATAFORMA
+    # (numero propio de un negocio via Embedded Signup): enlaza el evento
+    # con su BusinessChannel para reenviar con el business_id resuelto.
+    business_channel_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    event_type: Mapped[str] = mapped_column(String(64), default="unknown")
+    phone_number_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    payload: Mapped[str] = mapped_column(Text)
+    # None = no se pudo verificar (la app no tiene meta_app_secret
+    # configurado); True/False = verificada con el secret.
+    signature_valid: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # pending: persistido, aun sin intento | delivered: la app respondio 2xx
+    # failed: fallo, hay reintento programado (next_retry_at)
+    # dead: se agotaron los reintentos | skipped: app sin callback_url
+    # rejected: firma de Meta invalida - nunca se reenvia
+    forward_status: Mapped[str] = mapped_column(String(16), default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    next_retry_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    received_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class PanelUser(Base):
+    """Usuario del panel Connect (connect.nexolu.co).
+
+    Dos roles con distincion dura (pedido explicito de Alejandro):
+    `platform` es el admin de Nexolu (ve todas las apps: pos, spa, sga y
+    los clientes externos); `client` es un negocio EXTERNO que usa Connect
+    como producto y solo ve las apps a las que lo ata `PanelMembership`.
+
+    `password_hash` (bcrypt) es opcional: un usuario sin el solo puede
+    entrar por SSO (auth.nexolu.co). El operador de emergencia
+    (PANEL_EMAIL/PANEL_PASSWORD_HASH en env) NO vive en esta tabla a
+    proposito - es el break-glass que funciona aunque la BD este vacia,
+    mismo patron que nexolu-admin."""
+
+    __tablename__ = "panel_users"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    email: Mapped[str] = mapped_column(String(191), unique=True)
+    full_name: Mapped[str] = mapped_column(String(128), default="")
+    role: Mapped[str] = mapped_column(String(16), default="client")  # platform | client
+    password_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    memberships: Mapped[list[PanelMembership]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+
+
+class PanelMembership(Base):
+    """A que app (negocio) puede entrar un usuario `client`. Un cliente
+    externo ES una `CommsApp` (con sus credenciales, canales y uso, igual
+    que pos/spa) - la membresia solo lo ata a ella. `app_id` es el string
+    publico de la app, no el PK interno, por la misma razon que en
+    `Notification`/`BusinessChannel`: sobrevive al fallback legado y se
+    filtra directo contra esas tablas."""
+
+    __tablename__ = "panel_memberships"
+    __table_args__ = (UniqueConstraint("user_id", "app_id", name="uq_panel_membership_user_app"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(ForeignKey("panel_users.id"), index=True)
+    app_id: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+    user: Mapped[PanelUser] = relationship(back_populates="memberships")
+
+
+class BusinessChannel(Base):
+    """Identidad de WhatsApp de UN negocio dentro de una app: su propia
+    WABA, su propio numero y su propio token, obtenidos via Embedded Signup
+    (ver api/v1/onboarding.py).
+
+    Convive con `ProviderCredential`: esa sigue siendo el numero COMPARTIDO
+    de la app (el POS multi-tenant de hoy), esta es el numero PROPIO de un
+    negocio. El envio resuelve primero por (app_id, business_id) aca y cae
+    a la credencial de la app si no hay canal propio - asi los negocios
+    migran a numero propio uno a uno sin romper a los demas.
+
+    `app_id`/`business_id` son los mismos strings opacos de `Notification`:
+    este servicio no valida el business_id contra nada propio, es la app
+    duena quien le da significado (igual que en el resto del servicio).
+
+    `status`: pending (signup iniciado, sin completar) | active |
+    disconnected (token revocado desde Meta Business Suite, o desconexion
+    manual desde el panel - se conserva la fila para reconectar y para que
+    el historial de webhooks/notificaciones no quede huerfano).
+    """
+
+    __tablename__ = "business_channels"
+    __table_args__ = (
+        UniqueConstraint("app_id", "business_id", name="uq_business_channel_app_business"),
+        Index("ix_business_channels_phone", "phone_number_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    app_id: Mapped[str] = mapped_column(String(64))
+    business_id: Mapped[str] = mapped_column(String(64))
+    waba_id: Mapped[str] = mapped_column(String(64))
+    phone_number_id: Mapped[str] = mapped_column(String(64))
+    display_phone_number: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Business integration system user access token, del cliente onboardeado
+    # (ver el analisis, seccion I). Cifrado en reposo como todo secreto.
+    access_token: Mapped[str] = mapped_column(EncryptedString(1024))
+    # PIN de verificacion en dos pasos registrado por este servicio: hace
+    # falta de nuevo para re-registrar o migrar el numero.
+    pin: Mapped[str | None] = mapped_column(EncryptedString(255), nullable=True)
+    catalog_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="active")
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    connected_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    disconnected_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class IdempotencyRecord(Base):
+    """Respuesta ya emitida para un `Idempotency-Key` de una app.
+
+    `POST /v1/notifications/send` no era idempotente (limitacion conocida
+    del README): un timeout del lado del caller + retry = mensaje doble al
+    cliente final. Con esto, repetir la llamada con el mismo header
+    `Idempotency-Key` devuelve la respuesta original sin volver a enviar
+    nada. La clave la elige la app llamante (p.ej. su job id); este
+    servicio no le da significado."""
+
+    __tablename__ = "idempotency_records"
+    __table_args__ = (UniqueConstraint("app_id", "idempotency_key", name="uq_idempotency_app_key"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    app_id: Mapped[str] = mapped_column(String(64))
+    idempotency_key: Mapped[str] = mapped_column(String(191))
+    response_body: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
 class Notification(Base):

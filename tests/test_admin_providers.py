@@ -12,7 +12,7 @@ def test_meta_whatsapp_status_before_configuring(client, platform_headers, spa_a
     response = client.get("/v1/admin/apps/spa/providers/meta-whatsapp", headers=platform_headers)
 
     assert response.status_code == 200
-    assert response.json() == {"configured": False, "phone_number_id": None, "waba_id": None, "callback_url": None}
+    assert response.json() == {"configured": False, "phone_number_id": None, "waba_id": None, "callback_url": None, "enforce_meta_signature": False}
 
 
 def test_meta_whatsapp_secrets_404_before_configuring(client, platform_headers, spa_app):

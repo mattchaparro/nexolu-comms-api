@@ -12,15 +12,22 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Header
 from pydantic import BaseModel, Field
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexolu_comms_api.core.auth.apps import AppIdentity
 from nexolu_comms_api.core.auth.dependencies import get_current_app
 from nexolu_comms_api.core.channels.base import STATUS_FAILED, ChannelSendResult, OutboundMessage
+from nexolu_comms_api.core.channels.business_channels import (
+    BusinessChannelRepository,
+    resolve_whatsapp_identity,
+)
 from nexolu_comms_api.core.channels.exceptions import UnknownChannelError
 from nexolu_comms_api.core.channels.registry import get_channel_registry
+from nexolu_comms_api.core.db.entities import IdempotencyRecord
 from nexolu_comms_api.core.db.repository import NotificationRepository
 from nexolu_comms_api.core.db.session import get_session
 
@@ -107,15 +114,46 @@ async def send_notification(
     payload: SendRequest,
     app: AppIdentity = Depends(get_current_app),
     session: AsyncSession = Depends(get_session),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", max_length=191),
 ) -> SendResponse:
+    # Idempotencia opt-in por header: la app que reintenta tras un timeout
+    # manda la misma clave y recibe la respuesta original, sin enviar nada
+    # de nuevo. Sin header, el comportamiento es el de siempre.
+    if idempotency_key:
+        stored = await _stored_response(session, app.app_id, idempotency_key)
+        if stored is not None:
+            return stored
+
     registry = get_channel_registry()
     repo = NotificationRepository(session)
     results: list[ChannelResultOut] = []
     business_id = payload.business_id or app.app_id
 
+    # Numero propio del negocio, si lo tiene (Embedded Signup): el canal de
+    # WhatsApp envia con ESA identidad; sin canal propio, con la compartida
+    # de la app - el comportamiento historico. Ver core/channels/business_channels.py.
+    whatsapp_identity, own_channel = await resolve_whatsapp_identity(session, app, business_id)
+
     for channel_name in payload.channels:
         recipient = payload.to.get(channel_name)
-        result = await _send_one(registry, app, channel_name, recipient, payload)
+        effective_app = whatsapp_identity if channel_name == "whatsapp" else app
+        result = await _send_one(registry, effective_app, channel_name, recipient, payload)
+
+        if (
+            own_channel is not None
+            and channel_name == "whatsapp"
+            and result.provider_status_code == 401
+        ):
+            # Token del negocio revocado (p.ej. desde Meta Business Suite):
+            # no es un bug, es un estado - el canal queda desconectado y el
+            # panel/la app pueden ofrecer reconectar.
+            BusinessChannelRepository(session).mark_disconnected(
+                own_channel, "Meta rechazo el token (401) al enviar."
+            )
+            logger.warning(
+                "notifications.business_channel_disconnected",
+                extra={"app_id": app.app_id, "business_id": business_id, "channel_id": own_channel.id},
+            )
 
         repo.log(
             app_id=app.app_id,
@@ -140,7 +178,38 @@ async def send_notification(
 
     await session.commit()
 
-    return SendResponse(reference=payload.reference, business_id=business_id, results=results)
+    response = SendResponse(reference=payload.reference, business_id=business_id, results=results)
+
+    if idempotency_key:
+        await _store_response(session, app.app_id, idempotency_key, response)
+
+    return response
+
+
+async def _stored_response(session: AsyncSession, app_id: str, key: str) -> SendResponse | None:
+    row = (
+        await session.execute(
+            select(IdempotencyRecord).where(
+                IdempotencyRecord.app_id == app_id, IdempotencyRecord.idempotency_key == key
+            )
+        )
+    ).scalar_one_or_none()
+    return SendResponse.model_validate_json(row.response_body) if row else None
+
+
+async def _store_response(session: AsyncSession, app_id: str, key: str, response: SendResponse) -> None:
+    """Se guarda DESPUES de enviar: dos llamadas simultaneas con la misma
+    clave son una carrera que la restriccion unica resuelve - la segunda
+    insercion falla y no pasa nada (el envio de esa segunda llamada ya
+    ocurrio de todas formas; la idempotencia protege el caso real, que es
+    el retry SECUENCIAL tras un timeout)."""
+    session.add(
+        IdempotencyRecord(app_id=app_id, idempotency_key=key, response_body=response.model_dump_json())
+    )
+    try:
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
 
 
 async def _send_one(

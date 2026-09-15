@@ -1,7 +1,10 @@
 """Configuracion administrativa de credenciales de proveedor (Meta WhatsApp
 Cloud API, Brevo) por app.
 
-Mismo nivel de auth que admin_apps.py (`require_platform_access`). Dos
+Autorizado por SCOPE (`get_panel_scope`): la plataforma configura las
+credenciales de cualquier app; un cliente externo del panel Connect, SOLO
+las de sus propias apps (son SU WABA y SU cuenta de Brevo - configurarlas
+es parte de usar Connect como producto). Dos
 endpoints tipados por proveedor (no uno generico por `provider_slug` con un
 dict crudo) para que FastAPI valide cada forma distinta - Meta necesita
 phone_number_id/access_token/... y Brevo necesita from_email/brevo_api_key,
@@ -18,7 +21,8 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nexolu_comms_api.core.auth.dependencies import require_platform_access
+from nexolu_comms_api.core.auth.dependencies import get_panel_scope, require_scope_for_app
+from nexolu_comms_api.core.auth.panel import PanelScope
 from nexolu_comms_api.core.auth.repository import CommsAppRepository, ProviderCredentialRepository
 from nexolu_comms_api.core.db.session import get_session
 from nexolu_comms_api.core.schemas import (
@@ -33,10 +37,17 @@ from nexolu_comms_api.core.schemas import (
     MetaWhatsAppStatusOut,
 )
 
+
+async def _require_app_scope(app_id: str, scope: PanelScope = Depends(get_panel_scope)) -> None:
+    # 404 para lo ajeno (no se confirma existencia), igual que el resto del
+    # scoping del panel.
+    require_scope_for_app(scope, app_id)
+
+
 router = APIRouter(
     prefix="/v1/admin/apps/{app_id}/providers",
     tags=["admin"],
-    dependencies=[Depends(require_platform_access)],
+    dependencies=[Depends(_require_app_scope)],
 )
 
 
@@ -60,6 +71,7 @@ async def configure_meta_whatsapp(
         "phone_number_id": payload.phone_number_id,
         "waba_id": payload.waba_id,
         "callback_url": payload.callback_url,
+        "enforce_meta_signature": payload.enforce_meta_signature,
     }
     secrets = {
         "access_token": payload.access_token,

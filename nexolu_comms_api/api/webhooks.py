@@ -6,26 +6,117 @@ de la app, no del lado de Meta).
 Este servicio NUNCA interpreta el contenido de un evento entrante (texto,
 respuesta de un Flow, etc.) - eso es logica de cada app, no de un servicio
 producto-agnostico. `verify()` responde el handshake de Meta;
-`receive_event()` verifica la firma de Meta, responde 200 de inmediato (Meta
-reintenta si no responde rapido - ver mismo comentario en
-WhatsappWebhookController del POS) y reenvia el evento crudo, firmado, al
-callback propio de esa app EN SEGUNDO PLANO.
+`receive_event()` verifica la firma de Meta, PERSISTE el evento crudo en
+`webhook_events`, responde 200 de inmediato (Meta reintenta si no responde
+rapido) y dispara el primer intento de reenvio en segundo plano. Si ese
+intento falla, el worker de core/webhooks/forwarder.py lo reintenta con
+backoff - un evento ya no se pierde por un callback caido.
 """
 from __future__ import annotations
 
 import logging
 
-import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nexolu_comms_api.config import Settings, get_settings
+from nexolu_comms_api.config import get_settings
 from nexolu_comms_api.core.auth.apps import AppIdentity, resolve_by_app_id
+from nexolu_comms_api.core.channels.business_channels import BusinessChannelRepository
+from nexolu_comms_api.core.db.entities import WebhookEvent
 from nexolu_comms_api.core.db.session import get_session
-from nexolu_comms_api.core.webhooks.signing import build_forward_headers, verify_meta_signature
+from nexolu_comms_api.core.webhooks import forwarder
+from nexolu_comms_api.core.webhooks.events import classify
+from nexolu_comms_api.core.webhooks.signing import verify_meta_signature
 
 router = APIRouter(prefix="/webhooks/whatsapp", tags=["webhooks"])
 logger = logging.getLogger(__name__)
+
+# app_id reservado para eventos del webhook de PLATAFORMA que no se pudieron
+# atribuir a ningun BusinessChannel (numero desconocido, firma invalida).
+PLATFORM_APP_ID = "platform"
+
+
+@router.get("/platform")
+async def verify_platform(request: Request) -> Response:
+    """Handshake de Meta para el webhook de la App de plataforma (los
+    numeros propios conectados por Embedded Signup entran todos por aca:
+    Meta registra el webhook a nivel de App, no de numero)."""
+    settings = get_settings()
+    mode = request.query_params.get("hub.mode")
+    token = request.query_params.get("hub.verify_token")
+    challenge = request.query_params.get("hub.challenge") or ""
+
+    expected = settings.meta_platform_webhook_verify_token
+    if mode == "subscribe" and expected and token == expected:
+        return Response(content=challenge, media_type="text/plain")
+
+    logger.warning("webhooks.whatsapp.platform_verify_failed")
+    return Response(content="Forbidden", status_code=403)
+
+
+@router.post("/platform")
+async def receive_platform_event(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, bool]:
+    """Evento de un numero propio de un negocio. A diferencia del webhook
+    por app, aca la firma es OBLIGATORIA (endpoint nuevo, sin apps legadas
+    que acomodar: falla cerrado) y el negocio se resuelve por el
+    `phone_number_id` del payload contra `business_channels`."""
+    settings = get_settings()
+    if not settings.meta_platform_app_secret:
+        raise HTTPException(status_code=503, detail="El webhook de plataforma no esta configurado.")
+
+    body = await request.body()
+    event_type, phone_number_id = classify(body)
+
+    header = request.headers.get("x-hub-signature-256")
+    if not verify_meta_signature(body, header, settings.meta_platform_app_secret):
+        session.add(
+            WebhookEvent(
+                app_id=PLATFORM_APP_ID,
+                event_type=event_type,
+                phone_number_id=phone_number_id,
+                payload=body.decode("utf-8", errors="replace"),
+                signature_valid=False,
+                forward_status=forwarder.STATUS_REJECTED,
+                last_error="Firma de Meta invalida.",
+            )
+        )
+        await session.commit()
+        logger.warning("webhooks.whatsapp.platform_rejected", extra={"phone_number_id": phone_number_id})
+        raise HTTPException(status_code=401, detail="Firma de Meta invalida.")
+
+    channel = (
+        await BusinessChannelRepository(session).get_by_phone_number_id(phone_number_id)
+        if phone_number_id
+        else None
+    )
+
+    event = WebhookEvent(
+        app_id=channel.app_id if channel else PLATFORM_APP_ID,
+        business_channel_id=channel.id if channel else None,
+        event_type=event_type,
+        phone_number_id=phone_number_id,
+        payload=body.decode("utf-8", errors="replace"),
+        signature_valid=True,
+        # Sin canal conocido no hay a quien reenviar: queda `skipped`,
+        # visible en el panel (un numero suscrito que nadie reclama es un
+        # sintoma de onboarding a medias, no algo que ocultar).
+        forward_status=forwarder.STATUS_PENDING if channel else forwarder.STATUS_SKIPPED,
+    )
+    session.add(event)
+    await session.commit()
+
+    if channel:
+        background_tasks.add_task(forwarder.attempt_forward, event.id)
+    else:
+        logger.warning(
+            "webhooks.whatsapp.platform_unknown_number", extra={"phone_number_id": phone_number_id}
+        )
+
+    return {"ok": True}
 
 
 @router.get("/{app_id}")
@@ -58,46 +149,58 @@ async def receive_event(
         raise HTTPException(status_code=404, detail="App desconocida o sin WhatsApp configurado.")
 
     body = await request.body()
+    event_type, phone_number_id = classify(body)
+
+    signature_valid: bool | None = None
+    rejection: str | None = None
 
     if identity.whatsapp.meta_app_secret:
         header = request.headers.get("x-hub-signature-256")
-        if not verify_meta_signature(body, header, identity.whatsapp.meta_app_secret):
-            logger.warning("webhooks.whatsapp.invalid_meta_signature", extra={"app_id": app_id})
-            raise HTTPException(status_code=401, detail="Firma de Meta invalida.")
+        signature_valid = verify_meta_signature(body, header, identity.whatsapp.meta_app_secret)
+        if not signature_valid:
+            rejection = "Firma de Meta invalida."
+    elif identity.whatsapp.enforce_meta_signature:
+        # La app exige firma pero no tiene secret configurado: configuracion
+        # incompleta. Fallar cerrado - aceptar seria exactamente el agujero
+        # que el flag existe para tapar.
+        rejection = "La app exige firma de Meta pero no tiene meta_app_secret configurado."
+
+    # El evento se persiste TAMBIEN cuando se rechaza: un rechazo es una
+    # senal operativa (ataque, o secret mal configurado) que el panel debe
+    # poder mostrar; `rejected` nunca se reenvia ni se reintenta.
+    event = WebhookEvent(
+        app_id=app_id,
+        event_type=event_type,
+        phone_number_id=phone_number_id,
+        payload=body.decode("utf-8", errors="replace"),
+        signature_valid=signature_valid,
+        forward_status=forwarder.STATUS_REJECTED if rejection else forwarder.STATUS_PENDING,
+        last_error=rejection,
+    )
+    session.add(event)
+    await session.commit()
+
+    if rejection:
+        logger.warning(
+            "webhooks.whatsapp.rejected",
+            extra={"app_id": app_id, "event_id": event.id, "reason": rejection},
+        )
+        raise HTTPException(status_code=401, detail=rejection)
 
     if identity.whatsapp.callback_url and identity.whatsapp.callback_secret:
-        background_tasks.add_task(_forward, identity, body, get_settings())
+        # Primer intento inmediato, fuera del request: responder rapido y
+        # siempre 200 - si esta llamada se demorara, Meta consideraria la
+        # entrega fallida y reintentaria, duplicando el evento del lado de
+        # la app. Si el proceso muere antes del intento, el worker adopta el
+        # evento `pending` (ver PENDING_GRACE_SECONDS).
+        background_tasks.add_task(forwarder.attempt_forward, event.id)
     else:
+        event.forward_status = forwarder.STATUS_SKIPPED
+        await session.commit()
         logger.warning("webhooks.whatsapp.no_callback_configured", extra={"app_id": app_id})
 
-    # Responder rapido y siempre 200: si esta llamada se demora o falla,
-    # Meta considera la entrega fallida y reintenta, duplicando el evento
-    # del lado de la app - igual comportamiento que WhatsappWebhookController
-    # en el POS de hoy.
     return {"ok": True}
 
 
 async def _resolve(session: AsyncSession, app_id: str) -> AppIdentity | None:
     return await resolve_by_app_id(session, app_id)
-
-
-async def _forward(identity: AppIdentity, body: bytes, settings: Settings) -> None:
-    assert identity.whatsapp is not None  # ya se valido en receive_event()
-    headers = {
-        "Content-Type": "application/json",
-        **build_forward_headers(body, identity.whatsapp.callback_secret),
-    }
-
-    try:
-        async with httpx.AsyncClient(timeout=settings.http_timeout_seconds) as client:
-            response = await client.post(identity.whatsapp.callback_url, content=body, headers=headers)
-        if response.is_error:
-            logger.warning(
-                "webhooks.whatsapp.forward_rejected",
-                extra={"app_id": identity.app_id, "status_code": response.status_code},
-            )
-    except httpx.HTTPError as exc:
-        # No hay reintento ni cola de por medio en esta primera version: si
-        # el callback de la app no responde, el evento se pierde. Documentado
-        # como limitacion conocida en el README.
-        logger.warning("webhooks.whatsapp.forward_failed", extra={"app_id": identity.app_id, "error": str(exc)})

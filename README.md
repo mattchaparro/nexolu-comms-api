@@ -101,8 +101,13 @@ intenta y la respuesta trae un resultado por canal:
   con el App Secret de esa app), (2) responderle 200 a Meta de inmediato, y
   (3) reenviar el payload crudo, firmado con HMAC propio
   (`X-Nexolu-Timestamp`/`X-Nexolu-Signature`, mismo esquema que ya usa
-  Nexolu Payments Core), al `callback_url` que esa app registró. Sin cola
-  ni reintento todavía - ver limitaciones abajo.
+  Nexolu Payments Core), al `callback_url` que esa app registró. Cada
+  evento se **persiste crudo en `webhook_events` antes del 200**: si el
+  reenvío falla, un worker del propio proceso lo reintenta con backoff
+  (60s → 5m → 25m → 2h → 6h) hasta entregarlo o declararlo `dead` -
+  consultable y re-lanzable a mano vía `/v1/admin/webhook-events`. Con
+  `enforce_meta_signature` activo en la credencial de la app, un evento
+  sin firma verificable se rechaza con 401 (fallar cerrado).
 
 ## Endpoints
 
@@ -110,8 +115,20 @@ intenta y la respuesta trae un resultado por canal:
 |---|---|---|
 | `GET` | `/health` | Liveness check. |
 | `GET` | `/v1/channels` | Lista los canales disponibles. |
-| `POST` | `/v1/notifications/send` | Envía por uno o varios canales en una sola llamada. |
+| `POST` | `/v1/notifications/send` | Envía por uno o varios canales en una sola llamada. Acepta header `Idempotency-Key`: repetir la llamada con la misma clave devuelve la respuesta original sin reenviar. |
 | `POST` | `/v1/whatsapp/read-receipt` | Marca un mensaje entrante como leído + activa "escribiendo...". |
+| `POST` | `/panel/auth/login` | Sesión del panel Connect: contraseña de un `panel_user` o el break-glass de env (`PANEL_EMAIL`/`PANEL_PASSWORD_HASH`). |
+| `POST` | `/panel/auth/sso/exchange` | Canjea una aserción de nexolu-auth (RS256, audiencia `nexolu-connect`, verificación 100% local) por el JWT del panel. |
+| `GET` | `/panel/me` | Usuario de la sesión (rol + apps). |
+| `GET/POST/PATCH` | `/v1/admin/users` | (plataforma) Usuarios del panel: rol `platform` (admin Nexolú) o `client` (negocio externo atado a sus apps por membresías). |
+| `GET` | `/v1/onboarding/whatsapp/config` | (app) Datos para abrir el popup de Embedded Signup (meta_app_id, login_config_id). |
+| `GET` | `/v1/onboarding/whatsapp/channels/{business_id}` | (app) Estado del numero propio de un negocio (`not_connected`/`pending`/`active`/`disconnected`). |
+| `POST` | `/v1/onboarding/whatsapp/complete` | (app) Lado servidor del Embedded Signup: intercambia el code, suscribe la WABA, registra el numero y guarda el `BusinessChannel`. |
+| `GET`/`POST` | `/webhooks/whatsapp/platform` | Webhook de la App Meta de plataforma (numeros propios): firma obligatoria, enruta por `phone_number_id` y reenvia con `X-Nexolu-Business-Id`. |
+| `GET` | `/v1/admin/business-channels` | (plataforma) Canales por negocio; `/{id}` detalle, `/{id}/disconnect` desconexion manual. |
+| `GET` | `/v1/admin/webhook-events` | (plataforma) Lista eventos de webhook con filtros (`app_id`, `forward_status`, `event_type`). |
+| `GET` | `/v1/admin/webhook-events/{id}` | (plataforma) Detalle de un evento, con su payload crudo. |
+| `POST` | `/v1/admin/webhook-events/{id}/retry` | (plataforma) Re-lanza un evento `failed`/`dead`/`skipped`; `delivered` y `rejected` se rechazan (409). |
 | `GET` | `/v1/usage/summary` | Gasto propio de la app (opcional: por negocio/canal). |
 | `GET` | `/v1/usage/daily` | Serie diaria del gasto propio. |
 | `GET` | `/v1/platform/usage` | Gasto de TODAS las apps (requiere `NEXOLU_PLATFORM_API_KEY`). |
@@ -162,18 +179,25 @@ pytest
 ruff check .
 ```
 
+## Autorización del panel Connect (connect.nexolu.co)
+
+Dos sujetos con distinción dura: el **admin de Nexolú** (`role=platform`,
+o la platform key server-side) tiene acceso total; un **cliente externo**
+(`role=client`) es un negocio que usa Connect como producto — es una
+`CommsApp` propia, y su usuario queda atado a ella por `panel_memberships`.
+Todo endpoint que admite clientes se autoriza por **scope**
+(`get_panel_scope`): el recorte se aplica en el servidor y lo ajeno
+responde 404, como si no existiera. Crear apps, rotar api_keys y gestionar
+usuarios sigue siendo solo-plataforma (`require_platform_access`, que ya
+NO acepta JWTs de clientes). La identidad se resuelve contra la BD en cada
+request: desactivar un usuario mata su sesión de inmediato.
+
 ## Qué falta / deliberadamente fuera de alcance en esta primera versión
 
-- **Sin idempotencia**: llamar `POST /v1/notifications/send` dos veces con
-  la misma `reference` envía dos veces. La app llamante es responsable de
-  no duplicar la llamada.
 - **Sin gestión de plantillas de WhatsApp**: este servicio *envía*
   plantillas ya aprobadas en Meta, no las crea ni las administra - eso
-  sigue siendo un paso manual en el dashboard de Meta por app.
-- **Reenvío de webhooks sin cola ni reintento**: si el `callback_url` de
-  una app no responde, el evento se pierde (queda logueado, no
-  persistido). Para v1 es aceptable - agregar reintento con backoff es un
-  cambio localizado en `api/webhooks.py::_forward()` el día que haga falta.
+  sigue siendo un paso manual en el dashboard de Meta por app. (En el plan:
+  fase 3 de `nexolu-utils/docs/research/whatsapp-plan-implementacion.md`.)
 - **Costo de email desconocido**: no hay tarifa por mensaje configurada
   para Brevo (ver arriba). Si en el futuro se necesita, es un campo más en
   `EmailAppConfig`/`Settings`, mismo patrón que WhatsApp.

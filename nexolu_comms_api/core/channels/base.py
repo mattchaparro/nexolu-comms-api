@@ -52,6 +52,11 @@ class ChannelSendResult:
     # mismo que "cost=0" (ver Notification.cost_micros).
     cost_micros: int | None = None
     error: str | None = None
+    # Codigo HTTP que respondio el proveedor cuando el envio fallo por
+    # rechazo (no por red). Existe para que quien llama distinga un 401
+    # (token revocado -> desconectar el canal del negocio) de un 4xx/5xx
+    # cualquiera, sin parsear el texto del error.
+    provider_status_code: int | None = None
 
 
 class ChannelSender(ABC):

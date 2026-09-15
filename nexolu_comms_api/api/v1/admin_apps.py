@@ -13,17 +13,21 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nexolu_comms_api.core.auth.dependencies import require_platform_access
+from nexolu_comms_api.core.auth.dependencies import (
+    get_panel_scope,
+    require_platform_access,
+)
+from nexolu_comms_api.core.auth.panel import PanelScope
 from nexolu_comms_api.core.auth.repository import CommsAppRepository, ProviderCredentialRepository
 from nexolu_comms_api.core.db.entities import CommsApp
 from nexolu_comms_api.core.db.session import get_session
 from nexolu_comms_api.core.schemas import CommsAppCreatedOut, CommsAppIn, CommsAppOut, CommsAppPatch
 
-router = APIRouter(
-    prefix="/v1/admin/apps",
-    tags=["admin"],
-    dependencies=[Depends(require_platform_access)],
-)
+# El LISTADO es por scope (un cliente externo ve sus propias apps - es su
+# pantalla de inicio en Connect); crear apps, editarlas y rotar api_keys
+# sigue siendo SOLO plataforma, por eso esas rutas declaran
+# `require_platform_access` una a una en vez de heredarlo del router.
+router = APIRouter(prefix="/v1/admin/apps", tags=["admin"])
 
 
 def _mask(api_key: str) -> str:
@@ -61,12 +65,19 @@ async def _get_or_404(repo: CommsAppRepository, app_id: str) -> CommsApp:
 
 
 @router.get("", response_model=list[CommsAppOut])
-async def list_apps(session: AsyncSession = Depends(get_session)) -> list[CommsAppOut]:
+async def list_apps(
+    scope: PanelScope = Depends(get_panel_scope),
+    session: AsyncSession = Depends(get_session),
+) -> list[CommsAppOut]:
     apps = await CommsAppRepository(session).list_all()
+    apps = [app for app in apps if scope.allows(app.app_id)]
     return [await _to_out(session, app) for app in apps]
 
 
-@router.post("", response_model=CommsAppCreatedOut, status_code=status.HTTP_201_CREATED)
+@router.post(
+    "", response_model=CommsAppCreatedOut, status_code=status.HTTP_201_CREATED,
+    dependencies=[Depends(require_platform_access)],
+)
 async def create_app(payload: CommsAppIn, session: AsyncSession = Depends(get_session)) -> CommsAppCreatedOut:
     repo = CommsAppRepository(session)
 
@@ -80,7 +91,7 @@ async def create_app(payload: CommsAppIn, session: AsyncSession = Depends(get_se
     return await _to_created_out(session, app)
 
 
-@router.patch("/{app_id}", response_model=CommsAppOut)
+@router.patch("/{app_id}", response_model=CommsAppOut, dependencies=[Depends(require_platform_access)])
 async def update_app(
     app_id: str, payload: CommsAppPatch, session: AsyncSession = Depends(get_session)
 ) -> CommsAppOut:
@@ -92,7 +103,10 @@ async def update_app(
     return await _to_out(session, app)
 
 
-@router.post("/{app_id}/regenerate-key", response_model=CommsAppCreatedOut)
+@router.post(
+    "/{app_id}/regenerate-key", response_model=CommsAppCreatedOut,
+    dependencies=[Depends(require_platform_access)],
+)
 async def regenerate_key(app_id: str, session: AsyncSession = Depends(get_session)) -> CommsAppCreatedOut:
     repo = CommsAppRepository(session)
     app = await _get_or_404(repo, app_id)

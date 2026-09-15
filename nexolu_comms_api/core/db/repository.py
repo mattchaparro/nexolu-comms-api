@@ -64,12 +64,17 @@ class NotificationRepository:
         date_to: date | None,
         limit: int,
         offset: int,
+        # Recorte duro por conjunto de apps (scope de un cliente externo del
+        # panel Connect) - se aplica ADEMAS de `app_id`, nunca en su lugar.
+        app_ids: Sequence[str] | None = None,
     ) -> tuple[Sequence[Notification], int]:
         """Listado paginado para el panel de logs del Admin - a diferencia de
         las agregaciones de arriba, aca se devuelve la fila completa (no un
         rollup), mas el total sin paginar para que el frontend pueda armar
         controles de paginacion."""
         conditions: list[ColumnElement[bool]] = []
+        if app_ids is not None:
+            conditions.append(Notification.app_id.in_(app_ids))
         if app_id is not None:
             conditions.append(Notification.app_id == app_id)
         if business_id is not None:

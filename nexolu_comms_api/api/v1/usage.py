@@ -18,7 +18,12 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexolu_comms_api.core.auth.apps import AppIdentity
-from nexolu_comms_api.core.auth.dependencies import get_current_app, require_platform_access
+from nexolu_comms_api.core.auth.dependencies import (
+    get_current_app,
+    get_panel_scope,
+    require_scope_for_app,
+)
+from nexolu_comms_api.core.auth.panel import PanelScope
 from nexolu_comms_api.core.db.repository import NotificationRepository
 from nexolu_comms_api.core.db.session import get_session
 from nexolu_comms_api.core.telemetry.usage import UsageService
@@ -161,13 +166,17 @@ async def usage_daily(
     )
 
 
-@router.get("/platform/usage", response_model=PlatformUsageResponse, dependencies=[Depends(require_platform_access)])
+@router.get("/platform/usage", response_model=PlatformUsageResponse)
 async def platform_usage(
     app_id: str | None = Query(default=None, description="Filtra a una app: agrupa por negocio DENTRO de esa app en vez de por app."),
     date_from: date | None = Query(default=None),
     date_to: date | None = Query(default=None),
+    scope: PanelScope = Depends(get_panel_scope),
     session: AsyncSession = Depends(get_session),
 ) -> PlatformUsageResponse:
+    if app_id is not None:
+        require_scope_for_app(scope, app_id)
+
     start, end = _default_range(date_from, date_to)
     service = UsageService(NotificationRepository(session))
 
@@ -176,6 +185,11 @@ async def platform_usage(
         if app_id
         else await service.by_app(date_from=start, date_to=end)
     )
+    if app_id is None and scope.app_ids is not None:
+        # Cliente externo sin filtro: el desglose por app se recorta a las
+        # suyas. Post-filtro en memoria a proposito - el breakdown por app
+        # son N filas, no una tabla paginada.
+        rows = [r for r in rows if scope.allows(r.key)]
 
     return PlatformUsageResponse(
         date_from=start,
@@ -184,9 +198,7 @@ async def platform_usage(
     )
 
 
-@router.get(
-    "/platform/notifications", response_model=NotificationListOut, dependencies=[Depends(require_platform_access)]
-)
+@router.get("/platform/notifications", response_model=NotificationListOut)
 async def platform_notifications(
     app_id: str | None = Query(default=None),
     business_id: str | None = Query(default=None),
@@ -197,8 +209,12 @@ async def platform_notifications(
     date_to: date | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
+    scope: PanelScope = Depends(get_panel_scope),
     session: AsyncSession = Depends(get_session),
 ) -> NotificationListOut:
+    if app_id is not None:
+        require_scope_for_app(scope, app_id)
+
     repository = NotificationRepository(session)
     rows, total = await repository.list_notifications(
         app_id=app_id,
@@ -210,6 +226,7 @@ async def platform_notifications(
         date_to=date_to,
         limit=limit,
         offset=offset,
+        app_ids=scope.app_ids,
     )
 
     return NotificationListOut(

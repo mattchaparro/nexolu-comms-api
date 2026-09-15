@@ -64,6 +64,9 @@ class MetaWhatsAppIn(BaseModel):
     meta_app_secret: str | None = None
     callback_secret: str | None = None
     callback_url: str | None = None
+    # Exigir firma de Meta en el webhook de esta app (401 si falta o es
+    # invalida). Ver WhatsAppAppConfig.enforce_meta_signature.
+    enforce_meta_signature: bool = False
 
 
 class MetaWhatsAppStatusOut(BaseModel):
@@ -74,6 +77,7 @@ class MetaWhatsAppStatusOut(BaseModel):
     phone_number_id: str | None = None
     waba_id: str | None = None
     callback_url: str | None = None
+    enforce_meta_signature: bool = False
 
 
 class MetaInstagramIn(BaseModel):

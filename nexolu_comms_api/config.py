@@ -44,6 +44,13 @@ class WhatsAppAppConfig(BaseModel):
     waba_id: str | None = None
     webhook_verify_token: str | None = None
     meta_app_secret: str | None = None
+    # Con esto en True, un webhook sin firma verificable (sin
+    # `meta_app_secret` configurado, o con firma invalida) se rechaza con
+    # 401 en vez de pasar con warning. Default False para no romper apps
+    # existentes que aun no configuran el secret; se enciende POR APP desde
+    # el panel cuando la app tiene trafico real - un evento falsificado que
+    # se reenvia a una app de negocio es peor que un warning en el log.
+    enforce_meta_signature: bool = False
     callback_secret: str | None = None
     # A donde se reenvia (firmado) cada evento entrante de esta app - este
     # servicio NUNCA interpreta el mensaje (texto, respuesta de Flow, etc.),
@@ -126,6 +133,52 @@ class Settings(BaseSettings):
     brevo_api_base_url: str = "https://api.brevo.com/v3"
 
     http_timeout_seconds: int = 20
+
+    # Panel dedicado (nexolu-comms-front): un solo operador, credenciales en
+    # env vars y JWT verificado 100% local - mismo patron deliberado que
+    # nexolu-admin (el panel no puede depender de otro servicio para poder
+    # entrar). Vacios por defecto = login siempre falla (fallar cerrado).
+    # El JWT del panel vale como credencial de plataforma en /v1/admin/* y
+    # /v1/platform/* (ver require_platform_access).
+    panel_email: str = ""
+    panel_full_name: str = "Operador Nexolu"
+    panel_password_hash: str = ""  # bcrypt
+    panel_jwt_secret: str = ""
+    panel_jwt_ttl_hours: int = 24
+    # Origenes permitidos para CORS del panel (coma-separados). Vacio = sin
+    # CORS - las apps server-side no lo necesitan, solo el navegador del panel.
+    panel_cors_origins: str = ""
+
+    # SSO con nexolu-auth (auth.nexolu.co) - ver core/auth/sso.py. La llave
+    # publica va fijada aca ({kid: PEM en base64}), nunca se hace fetch:
+    # vacia = el canje responde 503 y el login local sigue intacto.
+    nexolu_auth_issuer: str = "https://auth.nexolu.co"
+    nexolu_auth_audience: str = "nexolu-connect"
+    nexolu_auth_public_keys: str = "{}"
+
+    # La App Meta de PLATAFORMA de Nexolu (una sola para todo el ecosistema):
+    # con ella corre Embedded Signup (los negocios conectan su propia WABA a
+    # traves de esta app) y a ella llegan los webhooks de esos numeros
+    # propios (POST /webhooks/whatsapp/platform). Distinta de las
+    # credenciales por app de `provider_credentials`, que son el numero
+    # compartido historico de cada app. Vacias por defecto: sin ellas, el
+    # onboarding responde 503 y el webhook de plataforma no acepta eventos.
+    meta_platform_app_id: str = ""
+    meta_platform_app_secret: str = ""
+    meta_platform_webhook_verify_token: str = ""
+    # Id de la configuracion de Facebook Login for Business que el front de
+    # cada app necesita para abrir el popup de Embedded Signup. No es un
+    # secreto, pero vive aca para que las apps lo consulten en vez de
+    # copiarlo en N .env.
+    meta_login_config_id: str = ""
+
+    # Worker de reintento de webhooks (ver core/webhooks/forwarder.py):
+    # corre dentro del mismo proceso uvicorn como task asyncio - no hay
+    # cola externa a este volumen, y agregar Redis/Celery por esto seria
+    # infraestructura sin retorno hoy. El flag existe para apagarlo en
+    # tests o si algun dia el reintento se muda a un proceso aparte.
+    webhook_retry_worker_enabled: bool = True
+    webhook_retry_interval_seconds: int = 30
 
     # Registro de apps cliente, como JSON crudo (parseado en `apps`).
     nexolu_apps_json: str = "{}"
