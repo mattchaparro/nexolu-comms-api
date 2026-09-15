@@ -12,6 +12,7 @@ from nexolu_comms_api.api.v1 import (
     admin_apps,
     admin_channels,
     admin_providers,
+    admin_templates,
     admin_users,
     admin_webhooks,
     health,
@@ -85,6 +86,7 @@ def create_app() -> FastAPI:
     app.include_router(admin_webhooks.router)
     app.include_router(admin_channels.router)
     app.include_router(admin_users.router)
+    app.include_router(admin_templates.router)
 
     return app
 

@@ -1,10 +1,11 @@
-"""Cliente minimo de Graph API para el onboarding de numeros propios
-(Embedded Signup). Solo las tres llamadas que el flujo necesita - ver el
-analisis (`nexolu-utils/docs/research/whatsapp-capacidad-transversal.md`,
-seccion I) y la doc oficial de Meta "Onboarding customers as a Tech
-Provider". El envio de mensajes NO pasa por aca (ese ya vive en
-core/channels/whatsapp.py); cuando llegue el modulo de catalogo (fase 4 del
-plan), sus llamadas se agregan a este cliente, no dispersas.
+"""Cliente minimo de Graph API: onboarding de numeros propios (Embedded
+Signup) y gestion de plantillas de mensaje. Solo las llamadas que los
+flujos necesitan - ver el analisis
+(`nexolu-utils/docs/research/whatsapp-capacidad-transversal.md`, secciones
+F e I) con sus fuentes oficiales. El envio de mensajes NO pasa por aca
+(ese ya vive en core/channels/whatsapp.py); cuando llegue el modulo de
+catalogo (fase 4 del plan), sus llamadas se agregan a este cliente, no
+dispersas.
 """
 from __future__ import annotations
 
@@ -60,6 +61,54 @@ class MetaGraphClient:
             f"/{phone_number_id}/register",
             token=access_token,
             json={"messaging_product": "whatsapp", "pin": pin},
+        )
+
+    # -- plantillas de mensaje (POST/GET/DELETE /{waba_id}/message_templates,
+    # permiso whatsapp_business_management; limite oficial: 100 creaciones
+    # por hora por WABA) ------------------------------------------------------
+
+    async def create_template(
+        self,
+        waba_id: str,
+        access_token: str,
+        *,
+        name: str,
+        language: str,
+        category: str,
+        components: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """@return la respuesta de Meta: {id, status, category}."""
+        return await self._request(
+            "POST",
+            f"/{waba_id}/message_templates",
+            token=access_token,
+            json={"name": name, "language": language, "category": category, "components": components},
+        )
+
+    async def list_templates(self, waba_id: str, access_token: str) -> list[dict[str, Any]]:
+        """Primera pagina (hasta 200): suficiente para el espejo de un
+        negocio normal; si alguna WABA supera eso, este es el punto unico
+        donde agregar paginacion por `paging.next`."""
+        data = await self._request(
+            "GET",
+            f"/{waba_id}/message_templates",
+            token=access_token,
+            params={
+                "fields": "id,name,language,status,category,components,quality_score",
+                "limit": "200",
+            },
+        )
+        items = data.get("data")
+        return items if isinstance(items, list) else []
+
+    async def delete_template(self, waba_id: str, access_token: str, name: str) -> None:
+        """OJO (comportamiento oficial de Meta): borra la plantilla `name`
+        en TODOS sus idiomas de esa WABA - no hay borrado por idioma."""
+        await self._request(
+            "DELETE",
+            f"/{waba_id}/message_templates",
+            token=access_token,
+            params={"name": name},
         )
 
     async def _request(

@@ -244,6 +244,51 @@ class BusinessChannel(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class WhatsAppTemplate(Base):
+    """Espejo local de UNA plantilla de mensaje de Meta.
+
+    Meta es la fuente de verdad del ESTADO (el aprobado/rechazado lo decide
+    su revision y llega por el webhook `message_template_status_update` o
+    por un sync manual); este espejo existe para que (1) el panel liste y
+    cree plantillas sin pegarle a Graph API en cada carga, y (2) el envio
+    pueda avisar ANTES de llamar a Meta que una plantilla no esta aprobada
+    - un envio masivo con una plantilla PAUSED que falla mensaje a mensaje
+    es plata y tiempo perdidos.
+
+    La identidad natural de Meta es (waba_id, name, language) - por eso la
+    restriccion unica es esa y no el `meta_template_id` (que llega despues,
+    con la respuesta de creacion o el primer sync).
+
+    `business_channel_id`: NULL = plantilla de la WABA compartida de la
+    app; con valor = de la WABA propia de ese negocio (Embedded Signup).
+    """
+
+    __tablename__ = "whatsapp_templates"
+    __table_args__ = (
+        UniqueConstraint("waba_id", "name", "language", name="uq_whatsapp_template_identity"),
+        Index("ix_whatsapp_templates_app", "app_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    app_id: Mapped[str] = mapped_column(String(64))
+    business_channel_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    waba_id: Mapped[str] = mapped_column(String(64))
+    name: Mapped[str] = mapped_column(String(191))
+    language: Mapped[str] = mapped_column(String(16))
+    category: Mapped[str] = mapped_column(String(32))  # MARKETING | UTILITY | AUTHENTICATION
+    # PENDING | APPROVED | REJECTED | PAUSED | DISABLED | IN_APPEAL ... -
+    # se guarda lo que Meta diga, sin lista cerrada: Meta agrega estados.
+    status: Mapped[str] = mapped_column(String(32), default="PENDING")
+    meta_template_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    components: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    quality_score: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Motivo del ultimo rechazo/pausa que reporto Meta.
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class IdempotencyRecord(Base):
     """Respuesta ya emitida para un `Idempotency-Key` de una app.
 

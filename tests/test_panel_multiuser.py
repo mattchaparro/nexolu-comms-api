@@ -338,3 +338,31 @@ def test_deactivating_a_user_kills_its_session_immediately(panel):
     # El JWT sigue vigente criptograficamente, pero la identidad se resuelve
     # contra la BD en cada request: el acceso muere YA, no cuando expire.
     assert panel.get("/panel/me", headers=_bearer(token)).status_code == 401
+
+
+def test_templates_are_scoped_for_client_users(panel):
+    from nexolu_comms_api.core.db.entities import WhatsAppTemplate
+    from nexolu_comms_api.core.db.session import get_sessionmaker
+
+    _seed_apps(panel, "luxury", "otra")
+    _create_client_user(panel, "dueña@luxurynails.co", ["luxury"])
+    token = _client_token(panel)
+
+    async def seed():
+        async with get_sessionmaker()() as session:
+            session.add(
+                WhatsAppTemplate(
+                    app_id="luxury", waba_id="w1", name="propia", language="es", category="UTILITY"
+                )
+            )
+            session.add(
+                WhatsAppTemplate(
+                    app_id="otra", waba_id="w2", name="ajena", language="es", category="UTILITY"
+                )
+            )
+            await session.commit()
+
+    asyncio.run(seed())
+
+    listed = panel.get("/v1/admin/templates", headers=_bearer(token)).json()["items"]
+    assert [t["name"] for t in listed] == ["propia"]

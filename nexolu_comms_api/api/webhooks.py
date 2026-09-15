@@ -24,6 +24,7 @@ from nexolu_comms_api.core.auth.apps import AppIdentity, resolve_by_app_id
 from nexolu_comms_api.core.channels.business_channels import BusinessChannelRepository
 from nexolu_comms_api.core.db.entities import WebhookEvent
 from nexolu_comms_api.core.db.session import get_session
+from nexolu_comms_api.core.templates.service import apply_status_update_from_event
 from nexolu_comms_api.core.webhooks import forwarder
 from nexolu_comms_api.core.webhooks.events import classify
 from nexolu_comms_api.core.webhooks.signing import verify_meta_signature
@@ -109,6 +110,11 @@ async def receive_platform_event(
     session.add(event)
     await session.commit()
 
+    if event_type == "template":
+        # Side-effect interno: reflejar el estado en el espejo de
+        # plantillas. El reenvio a la app duena no cambia.
+        background_tasks.add_task(apply_status_update_from_event, event.id)
+
     if channel:
         background_tasks.add_task(forwarder.attempt_forward, event.id)
     else:
@@ -186,6 +192,11 @@ async def receive_event(
             extra={"app_id": app_id, "event_id": event.id, "reason": rejection},
         )
         raise HTTPException(status_code=401, detail=rejection)
+
+    if event_type == "template":
+        # Side-effect interno: reflejar el estado en el espejo de
+        # plantillas. El reenvio a la app duena no cambia.
+        background_tasks.add_task(apply_status_update_from_event, event.id)
 
     if identity.whatsapp.callback_url and identity.whatsapp.callback_secret:
         # Primer intento inmediato, fuera del request: responder rapido y

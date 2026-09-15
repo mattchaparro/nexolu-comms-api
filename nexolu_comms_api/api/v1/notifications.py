@@ -30,6 +30,7 @@ from nexolu_comms_api.core.channels.registry import get_channel_registry
 from nexolu_comms_api.core.db.entities import IdempotencyRecord
 from nexolu_comms_api.core.db.repository import NotificationRepository
 from nexolu_comms_api.core.db.session import get_session
+from nexolu_comms_api.core.templates.service import TemplateRepository
 
 router = APIRouter(prefix="/v1", tags=["notifications"])
 logger = logging.getLogger(__name__)
@@ -134,10 +135,20 @@ async def send_notification(
     # de la app - el comportamiento historico. Ver core/channels/business_channels.py.
     whatsapp_identity, own_channel = await resolve_whatsapp_identity(session, app, business_id)
 
+    # Aviso temprano del espejo de plantillas: si la plantilla pedida esta
+    # en el espejo y NO esta aprobada, se corta antes de llamar a Meta (un
+    # envio masivo con una plantilla PAUSED fallaria mensaje a mensaje,
+    # gastando rate limit y tiempo). Si el espejo no la conoce, se envia
+    # igual - el espejo es opt-in, no un registro obligatorio.
+    template_block = await _template_block_reason(session, app, whatsapp_identity, payload)
+
     for channel_name in payload.channels:
         recipient = payload.to.get(channel_name)
         effective_app = whatsapp_identity if channel_name == "whatsapp" else app
-        result = await _send_one(registry, effective_app, channel_name, recipient, payload)
+        if channel_name == "whatsapp" and template_block is not None:
+            result = ChannelSendResult(status=STATUS_FAILED, error=template_block)
+        else:
+            result = await _send_one(registry, effective_app, channel_name, recipient, payload)
 
         if (
             own_channel is not None
@@ -210,6 +221,24 @@ async def _store_response(session: AsyncSession, app_id: str, key: str, response
         await session.commit()
     except IntegrityError:
         await session.rollback()
+
+
+async def _template_block_reason(
+    session: AsyncSession, app: AppIdentity, effective: AppIdentity, payload: SendRequest
+) -> str | None:
+    if payload.whatsapp_template is None:
+        return None
+    waba_id = effective.whatsapp.waba_id if effective.whatsapp else None
+    row = await TemplateRepository(session).get_for_send(
+        app.app_id, waba_id, payload.whatsapp_template.name, payload.whatsapp_template.language
+    )
+    if row is None or row.status == "APPROVED":
+        return None
+    detail = f" ({row.reason})" if row.reason else ""
+    return (
+        f"La plantilla '{row.name}' ({row.language}) esta en estado {row.status}{detail} - "
+        "no se envio para no quemar el rate limit contra un rechazo seguro."
+    )
 
 
 async def _send_one(

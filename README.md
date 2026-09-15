@@ -125,7 +125,8 @@ intenta y la respuesta trae un resultado por canal:
 | `GET` | `/v1/onboarding/whatsapp/channels/{business_id}` | (app) Estado del numero propio de un negocio (`not_connected`/`pending`/`active`/`disconnected`). |
 | `POST` | `/v1/onboarding/whatsapp/complete` | (app) Lado servidor del Embedded Signup: intercambia el code, suscribe la WABA, registra el numero y guarda el `BusinessChannel`. |
 | `GET`/`POST` | `/webhooks/whatsapp/platform` | Webhook de la App Meta de plataforma (numeros propios): firma obligatoria, enruta por `phone_number_id` y reenvia con `X-Nexolu-Business-Id`. |
-| `GET` | `/v1/admin/business-channels` | (plataforma) Canales por negocio; `/{id}` detalle, `/{id}/disconnect` desconexion manual. |
+| `GET` | `/v1/admin/business-channels` | (scope) Canales por negocio; `/{id}` detalle, `/{id}/disconnect` desconexion manual. |
+| `GET/POST` | `/v1/admin/templates` | (scope) Espejo de plantillas de Meta: listar y crear (`POST /{waba_id}/message_templates`); `/sync` reconcilia contra Meta; `DELETE /{id}` borra en Meta (¡todos los idiomas del nombre!) y en el espejo. El estado se mantiene al dia solo con el webhook `message_template_status_update`, y `/v1/notifications/send` corta ANTES de llamar a Meta si la plantilla pedida esta en el espejo y no esta APPROVED. |
 | `GET` | `/v1/admin/webhook-events` | (plataforma) Lista eventos de webhook con filtros (`app_id`, `forward_status`, `event_type`). |
 | `GET` | `/v1/admin/webhook-events/{id}` | (plataforma) Detalle de un evento, con su payload crudo. |
 | `POST` | `/v1/admin/webhook-events/{id}/retry` | (plataforma) Re-lanza un evento `failed`/`dead`/`skipped`; `delivered` y `rejected` se rechazan (409). |
@@ -194,10 +195,6 @@ request: desactivar un usuario mata su sesión de inmediato.
 
 ## Qué falta / deliberadamente fuera de alcance en esta primera versión
 
-- **Sin gestión de plantillas de WhatsApp**: este servicio *envía*
-  plantillas ya aprobadas en Meta, no las crea ni las administra - eso
-  sigue siendo un paso manual en el dashboard de Meta por app. (En el plan:
-  fase 3 de `nexolu-utils/docs/research/whatsapp-plan-implementacion.md`.)
 - **Costo de email desconocido**: no hay tarifa por mensaje configurada
   para Brevo (ver arriba). Si en el futuro se necesita, es un campo más en
   `EmailAppConfig`/`Settings`, mismo patrón que WhatsApp.
