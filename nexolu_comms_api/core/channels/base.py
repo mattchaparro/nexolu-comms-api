@@ -42,6 +42,14 @@ class OutboundMessage:
     flow_cta: str | None = None
     flow_token: str | None = None
     flow_data: dict[str, Any] = field(default_factory=dict)
+    # Mensaje interactivo de botones de respuesta (reply buttons, max 3 por
+    # regla de Meta): [{"id": ..., "title": ...}]. Usado por el motor de
+    # flujos (core/flows) y disponible tambien para las apps.
+    buttons: list[dict[str, str]] = field(default_factory=list)
+    # Mensaje interactivo con boton de URL (cta_url): el "gestionar tu cita
+    # desde la web" - abre el link sin salir del chat.
+    cta_url: str | None = None
+    cta_title: str | None = None
 
 
 @dataclass(frozen=True)

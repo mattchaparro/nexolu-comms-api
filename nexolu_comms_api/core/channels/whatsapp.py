@@ -139,6 +139,44 @@ class WhatsAppChannel(ChannelSender):
                 },
             }
 
+        if message.buttons:
+            return {
+                "messaging_product": "whatsapp",
+                "to": message.to,
+                "type": "interactive",
+                "interactive": {
+                    "type": "button",
+                    "body": {"text": message.text or ""},
+                    "action": {
+                        "buttons": [
+                            # Reglas de Meta: max 3 botones, titulos de max
+                            # 20 caracteres - se recortan aca en vez de dejar
+                            # que Meta rechace el mensaje completo.
+                            {"type": "reply", "reply": {"id": b["id"], "title": b["title"][:20]}}
+                            for b in message.buttons[:3]
+                        ]
+                    },
+                },
+            }
+
+        if message.cta_url:
+            return {
+                "messaging_product": "whatsapp",
+                "to": message.to,
+                "type": "interactive",
+                "interactive": {
+                    "type": "cta_url",
+                    "body": {"text": message.text or ""},
+                    "action": {
+                        "name": "cta_url",
+                        "parameters": {
+                            "display_text": (message.cta_title or "Abrir")[:20],
+                            "url": message.cta_url,
+                        },
+                    },
+                },
+            }
+
         if message.text:
             return {
                 "messaging_product": "whatsapp",

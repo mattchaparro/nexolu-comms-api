@@ -289,6 +289,93 @@ class WhatsAppTemplate(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class Contact(Base):
+    """Un contacto de WhatsApp de un negocio, con tags y campos libres - el
+    modelo subscriber/tags/custom-fields de ManyChat, que es lo que permite
+    intercambiar datos entre las apps y los flujos.
+
+    `business_id` con "" = contacto a nivel de app (numero compartido; la
+    app multi-tenant resuelve su negocio por su lado). Cadena vacia y no
+    NULL a proposito: NULL no participa en restricciones unicas en MySQL/
+    SQLite y la identidad (app, negocio, telefono) debe ser unica de
+    verdad.
+
+    `tags`: lista de strings. `fields`: dict libre (el significado lo dan
+    las apps y los flujos, este servicio no lo interpreta - solo lo
+    interpola en los mensajes de los flujos)."""
+
+    __tablename__ = "contacts"
+    __table_args__ = (
+        UniqueConstraint("app_id", "business_id", "phone", name="uq_contact_identity"),
+        Index("ix_contacts_app", "app_id", "business_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    app_id: Mapped[str] = mapped_column(String(64))
+    business_id: Mapped[str] = mapped_column(String(64), default="")
+    phone: Mapped[str] = mapped_column(String(32))
+    name: Mapped[str] = mapped_column(String(128), default="")
+    tags: Mapped[list[str]] = mapped_column(JSON, default=list)
+    fields: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    last_inbound_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class Flow(Base):
+    """Un flujo de automatizacion de conversacion (el concepto central de
+    ManyChat, adaptado al guardrail de Connect: el flujo orquesta la
+    CONVERSACION - mensajes, botones, ramas, tags -; la accion de negocio
+    real la ejecuta la app duena, via link web dentro del flujo o porque
+    ella misma lo disparo por API).
+
+    `trigger_type`: "keyword" (un mensaje entrante que matchee
+    `trigger_keywords` lo arranca) o "api" (solo lo arranca la app via
+    POST /v1/flows/trigger - el caso "agendaste una cita"). `definition`
+    es el grafo de nodos - ver core/flows/engine.py para el esquema y su
+    validacion."""
+
+    __tablename__ = "flows"
+    __table_args__ = (
+        UniqueConstraint("app_id", "business_id", "name", name="uq_flow_identity"),
+        Index("ix_flows_app", "app_id", "business_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    app_id: Mapped[str] = mapped_column(String(64))
+    business_id: Mapped[str] = mapped_column(String(64), default="")
+    name: Mapped[str] = mapped_column(String(128))
+    trigger_type: Mapped[str] = mapped_column(String(16), default="api")  # keyword | api
+    trigger_keywords: Mapped[list[str]] = mapped_column(JSON, default=list)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    definition: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class FlowSession(Base):
+    """Donde va UN contacto dentro de UN flujo: el nodo en el que quedo
+    esperando respuesta y el contexto de variables acumulado (las que trajo
+    el trigger + las que fijan los nodos). Una sesion `active` por contacto
+    como maximo (arrancar un flujo nuevo cierra la anterior como
+    `superseded` - comportamiento ManyChat: el flujo mas reciente gana)."""
+
+    __tablename__ = "flow_sessions"
+    __table_args__ = (Index("ix_flow_sessions_contact", "contact_id", "status"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    flow_id: Mapped[str] = mapped_column(String(32))
+    contact_id: Mapped[str] = mapped_column(String(32))
+    app_id: Mapped[str] = mapped_column(String(64))
+    business_id: Mapped[str] = mapped_column(String(64), default="")
+    current_node: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    context: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    # active (esperando respuesta) | completed | superseded | expired
+    status: Mapped[str] = mapped_column(String(16), default="active")
+    started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class IdempotencyRecord(Base):
     """Respuesta ya emitida para un `Idempotency-Key` de una app.
 

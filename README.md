@@ -126,6 +126,9 @@ intenta y la respuesta trae un resultado por canal:
 | `POST` | `/v1/onboarding/whatsapp/complete` | (app) Lado servidor del Embedded Signup: intercambia el code, suscribe la WABA, registra el numero y guarda el `BusinessChannel`. |
 | `GET`/`POST` | `/webhooks/whatsapp/platform` | Webhook de la App Meta de plataforma (numeros propios): firma obligatoria, enruta por `phone_number_id` y reenvia con `X-Nexolu-Business-Id`. |
 | `GET` | `/v1/admin/business-channels` | (scope) Canales por negocio; `/{id}` detalle, `/{id}/disconnect` desconexion manual. |
+| `POST` | `/v1/flows/trigger` | (app) Dispara un flujo de conversación para un teléfono con variables — el caso "agendaste una cita". |
+| `GET/POST/PATCH/DELETE` | `/v1/admin/flows` | (scope) Flujos de automatización (modelo ManyChat): disparador keyword/API, nodos message/buttons/cta_url, tags y variables; la definición se valida al guardar. Ver core/flows/engine.py. |
+| `GET/PATCH` | `/v1/admin/contacts` | (scope) Contactos con tags y campos (el subscriber de ManyChat), creados solos por mensajes entrantes o flujos. |
 | `GET/POST` | `/v1/admin/templates` | (scope) Espejo de plantillas de Meta: listar y crear (`POST /{waba_id}/message_templates`); `/sync` reconcilia contra Meta; `DELETE /{id}` borra en Meta (¡todos los idiomas del nombre!) y en el espejo. El estado se mantiene al dia solo con el webhook `message_template_status_update`, y `/v1/notifications/send` corta ANTES de llamar a Meta si la plantilla pedida esta en el espejo y no esta APPROVED. |
 | `GET` | `/v1/admin/webhook-events` | (plataforma) Lista eventos de webhook con filtros (`app_id`, `forward_status`, `event_type`). |
 | `GET` | `/v1/admin/webhook-events/{id}` | (plataforma) Detalle de un evento, con su payload crudo. |
