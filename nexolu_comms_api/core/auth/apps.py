@@ -52,6 +52,8 @@ def _whatsapp_config(credential: ProviderCredential) -> WhatsAppAppConfig:
         webhook_verify_token=credential.secrets.get("webhook_verify_token"),
         meta_app_secret=credential.secrets.get("meta_app_secret"),
         enforce_meta_signature=bool(credential.config.get("enforce_meta_signature", False)),
+        catalog_id=credential.config.get("catalog_id"),
+        meta_business_id=credential.config.get("meta_business_id"),
         callback_secret=credential.secrets.get("callback_secret"),
         callback_url=credential.config.get("callback_url"),
     )

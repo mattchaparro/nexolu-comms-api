@@ -10,12 +10,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from nexolu_comms_api.api import panel, webhooks
 from nexolu_comms_api.api.v1 import (
     admin_apps,
+    admin_catalog,
     admin_channels,
     admin_flows,
     admin_providers,
     admin_templates,
     admin_users,
     admin_webhooks,
+    catalog,
     flows,
     health,
     instagram,
@@ -90,7 +92,9 @@ def create_app() -> FastAPI:
     app.include_router(admin_users.router)
     app.include_router(admin_templates.router)
     app.include_router(admin_flows.router)
+    app.include_router(admin_catalog.router)
     app.include_router(flows.router)
+    app.include_router(catalog.router)
 
     return app
 

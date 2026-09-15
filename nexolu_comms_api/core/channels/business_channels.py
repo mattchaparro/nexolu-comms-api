@@ -81,6 +81,7 @@ def whatsapp_identity_for(app: AppIdentity, channel: BusinessChannel) -> AppIden
             webhook_verify_token=base.webhook_verify_token if base else None,
             meta_app_secret=base.meta_app_secret if base else None,
             enforce_meta_signature=base.enforce_meta_signature if base else False,
+            catalog_id=channel.catalog_id,
             callback_secret=base.callback_secret if base else None,
             callback_url=base.callback_url if base else None,
         ),

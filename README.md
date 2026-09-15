@@ -115,7 +115,7 @@ intenta y la respuesta trae un resultado por canal:
 |---|---|---|
 | `GET` | `/health` | Liveness check. |
 | `GET` | `/v1/channels` | Lista los canales disponibles. |
-| `POST` | `/v1/notifications/send` | Envía por uno o varios canales en una sola llamada. Acepta header `Idempotency-Key`: repetir la llamada con la misma clave devuelve la respuesta original sin reenviar. |
+| `POST` | `/v1/notifications/send` | Envía por uno o varios canales en una sola llamada (texto, plantilla, Flow, y mensajes de producto: `whatsapp_product` (SPM), `whatsapp_products` (MPM, ≤30), `whatsapp_catalog` — el `catalog_id` sale solo de la identidad que envía). Acepta header `Idempotency-Key`. |
 | `POST` | `/v1/whatsapp/read-receipt` | Marca un mensaje entrante como leído + activa "escribiendo...". |
 | `POST` | `/panel/auth/login` | Sesión del panel Connect: contraseña de un `panel_user` o el break-glass de env (`PANEL_EMAIL`/`PANEL_PASSWORD_HASH`). |
 | `POST` | `/panel/auth/sso/exchange` | Canjea una aserción de nexolu-auth (RS256, audiencia `nexolu-connect`, verificación 100% local) por el JWT del panel. |
@@ -126,6 +126,8 @@ intenta y la respuesta trae un resultado por canal:
 | `POST` | `/v1/onboarding/whatsapp/complete` | (app) Lado servidor del Embedded Signup: intercambia el code, suscribe la WABA, registra el numero y guarda el `BusinessChannel`. |
 | `GET`/`POST` | `/webhooks/whatsapp/platform` | Webhook de la App Meta de plataforma (numeros propios): firma obligatoria, enruta por `phone_number_id` y reenvia con `X-Nexolu-Business-Id`. |
 | `GET` | `/v1/admin/business-channels` | (scope) Canales por negocio; `/{id}` detalle, `/{id}/disconnect` desconexion manual. |
+| `POST` | `/v1/catalog/sync` | (app) Sincroniza productos al catálogo de Meta (`items_batch` oficial por `retailer_id`; lo que no cambió no se re-envía — content_hash). `/check` resuelve los lotes pendientes; `GET /status` el estado por item. |
+| `POST` | `/v1/admin/catalogs` | (scope) Crea/conecta el catálogo de una app o negocio a su WABA y guarda el `catalog_id`; `/v1/admin/catalog-items` lista el estado de sync, `/check` re-verifica. |
 | `POST` | `/v1/flows/trigger` | (app) Dispara un flujo de conversación para un teléfono con variables — el caso "agendaste una cita". |
 | `GET/POST/PATCH/DELETE` | `/v1/admin/flows` | (scope) Flujos de automatización (modelo ManyChat): disparador keyword/API, nodos message/buttons/cta_url, tags y variables; la definición se valida al guardar. Ver core/flows/engine.py. |
 | `GET/PATCH` | `/v1/admin/contacts` | (scope) Contactos con tags y campos (el subscriber de ManyChat), creados solos por mensajes entrantes o flujos. |

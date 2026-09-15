@@ -51,6 +51,13 @@ class WhatsAppAppConfig(BaseModel):
     # el panel cuando la app tiene trafico real - un evento falsificado que
     # se reenvia a una app de negocio es peor que un warning en el log.
     enforce_meta_signature: bool = False
+    # Catalogo conectado a la WABA (uno solo por WABA, regla de Meta). Para
+    # el numero compartido de la app vive en la credencial; para un numero
+    # propio, en BusinessChannel.catalog_id - ver whatsapp_identity_for().
+    catalog_id: str | None = None
+    # Meta Business (portafolio) duenio de la WABA: hace falta para CREAR
+    # un catalogo por API (POST /{business_id}/owned_product_catalogs).
+    meta_business_id: str | None = None
     callback_secret: str | None = None
     # A donde se reenvia (firmado) cada evento entrante de esta app - este
     # servicio NUNCA interpreta el mensaje (texto, respuesta de Flow, etc.),

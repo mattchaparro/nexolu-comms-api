@@ -67,6 +67,11 @@ class MetaWhatsAppIn(BaseModel):
     # Exigir firma de Meta en el webhook de esta app (401 si falta o es
     # invalida). Ver WhatsAppAppConfig.enforce_meta_signature.
     enforce_meta_signature: bool = False
+    # Catalogo conectado a la WABA y portafolio de Meta Business dueno -
+    # normalmente los fija POST /v1/admin/catalogs, pero se aceptan aca
+    # para pegarlos a mano.
+    catalog_id: str | None = None
+    meta_business_id: str | None = None
 
 
 class MetaWhatsAppStatusOut(BaseModel):
@@ -78,6 +83,8 @@ class MetaWhatsAppStatusOut(BaseModel):
     waba_id: str | None = None
     callback_url: str | None = None
     enforce_meta_signature: bool = False
+    catalog_id: str | None = None
+    meta_business_id: str | None = None
 
 
 class MetaInstagramIn(BaseModel):

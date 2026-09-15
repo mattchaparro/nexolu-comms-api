@@ -50,6 +50,18 @@ class OutboundMessage:
     # desde la web" - abre el link sin salir del chat.
     cta_url: str | None = None
     cta_title: str | None = None
+    # Mensajes de producto (catalogo conectado a la WABA; payloads oficiales
+    # en el analisis, seccion H). `catalog_id` puede omitirse: el canal usa
+    # el de la identidad efectiva (app o canal del negocio).
+    product_retailer_id: str | None = None  # SPM: un producto
+    # MPM: hasta 30 productos en secciones [{"title", "product_retailer_ids": [...]}]
+    product_sections: list[dict[str, Any]] = field(default_factory=list)
+    product_header: str | None = None
+    product_footer: str | None = None
+    catalog_id: str | None = None
+    # Catalogo completo (interactive.catalog_message)
+    send_catalog: bool = False
+    catalog_thumbnail_retailer_id: str | None = None
 
 
 @dataclass(frozen=True)

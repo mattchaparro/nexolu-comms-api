@@ -101,6 +101,59 @@ class MetaGraphClient:
         items = data.get("data")
         return items if isinstance(items, list) else []
 
+    # -- catalogo y comercio (fuentes oficiales en el analisis, seccion F:
+    # Product Catalog reference, items_batch, WABA product_catalogs edge;
+    # limites: ~100 batches/hora por catalogo, hasta 5.000 items/request) ----
+
+    async def create_catalog(
+        self, meta_business_id: str, access_token: str, *, name: str, vertical: str = "commerce"
+    ) -> str:
+        """POST /{business_id}/owned_product_catalogs. @return catalog_id.
+        OJO (condicion oficial): los Terminos de catalogo se aceptan creando
+        el PRIMER catalogo del negocio via Business Manager - si nunca se ha
+        hecho, esta llamada falla y ese paso manual es del cliente."""
+        data = await self._request(
+            "POST",
+            f"/{meta_business_id}/owned_product_catalogs",
+            token=access_token,
+            json={"name": name, "vertical": vertical},
+        )
+        catalog_id = data.get("id")
+        if not catalog_id:
+            raise MetaGraphError("Meta no devolvio el id del catalogo creado.")
+        return str(catalog_id)
+
+    async def connect_catalog_to_waba(self, waba_id: str, access_token: str, catalog_id: str) -> None:
+        """POST /{waba_id}/product_catalogs. Regla de Meta: UN catalogo
+        conectado por WABA."""
+        await self._request(
+            "POST",
+            f"/{waba_id}/product_catalogs",
+            token=access_token,
+            json={"catalog_id": catalog_id},
+        )
+
+    async def items_batch(
+        self, catalog_id: str, access_token: str, requests: list[dict[str, Any]], *, allow_upsert: bool = True
+    ) -> dict[str, Any]:
+        """POST /{catalog_id}/items_batch. @return la respuesta cruda de
+        Meta ({handles: [...], validation_status: [...]})."""
+        return await self._request(
+            "POST",
+            f"/{catalog_id}/items_batch",
+            token=access_token,
+            json={"item_type": "PRODUCT_ITEM", "allow_upsert": allow_upsert, "requests": requests},
+        )
+
+    async def check_batch_status(self, catalog_id: str, access_token: str, handle: str) -> dict[str, Any]:
+        """GET /{catalog_id}/check_batch_request_status por handle."""
+        return await self._request(
+            "GET",
+            f"/{catalog_id}/check_batch_request_status",
+            token=access_token,
+            params={"handle": handle},
+        )
+
     async def delete_template(self, waba_id: str, access_token: str, name: str) -> None:
         """OJO (comportamiento oficial de Meta): borra la plantilla `name`
         en TODOS sus idiomas de esa WABA - no hay borrado por idioma."""

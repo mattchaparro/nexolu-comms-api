@@ -61,6 +61,32 @@ class WhatsAppFlowIn(BaseModel):
     data: dict = Field(default_factory=dict)
 
 
+class WhatsAppProductIn(BaseModel):
+    """Producto individual (SPM). `catalog_id` opcional: sin el, se usa el
+    catalogo conectado de la identidad que envia (app o negocio)."""
+
+    product_retailer_id: str
+    catalog_id: str | None = None
+    footer: str | None = None
+
+
+class WhatsAppProductsIn(BaseModel):
+    """Multiples productos (MPM): hasta 30 en total, en secciones. Header
+    y body (el `text` del request) son obligatorios segun Meta."""
+
+    header: str
+    sections: list[dict] = Field(min_length=1, description="[{'title': ..., 'product_retailer_ids': [...]}]")
+    catalog_id: str | None = None
+    footer: str | None = None
+
+
+class WhatsAppCatalogIn(BaseModel):
+    """Catalogo completo (catalog_message): invita a explorar todo."""
+
+    thumbnail_product_retailer_id: str | None = None
+    footer: str | None = None
+
+
 class SendRequest(BaseModel):
     # Clave de particion OPACA que la app define para agrupar sus propios
     # reportes de uso (ver GET /v1/usage/*) - este servicio nunca la valida
@@ -85,6 +111,9 @@ class SendRequest(BaseModel):
     )
     whatsapp_template: WhatsAppTemplateIn | None = None
     whatsapp_flow: WhatsAppFlowIn | None = None
+    whatsapp_product: WhatsAppProductIn | None = None
+    whatsapp_products: WhatsAppProductsIn | None = None
+    whatsapp_catalog: WhatsAppCatalogIn | None = None
 
 
 class ChannelResultOut(BaseModel):
@@ -256,6 +285,9 @@ async def _send_one(
         return ChannelSendResult(status=STATUS_FAILED, error=str(exc))
 
     flow = payload.whatsapp_flow
+    product = payload.whatsapp_product
+    products = payload.whatsapp_products
+    catalog = payload.whatsapp_catalog
     message = OutboundMessage(
         to=recipient,
         subject=payload.subject,
@@ -270,6 +302,15 @@ async def _send_one(
         flow_cta=flow.cta if flow else None,
         flow_token=flow.flow_token if flow else None,
         flow_data=flow.data if flow else {},
+        product_retailer_id=product.product_retailer_id if product else None,
+        product_sections=products.sections if products else [],
+        product_header=products.header if products else None,
+        product_footer=(product.footer if product else None)
+        or (products.footer if products else None)
+        or (catalog.footer if catalog else None),
+        catalog_id=(product.catalog_id if product else None) or (products.catalog_id if products else None),
+        send_catalog=catalog is not None,
+        catalog_thumbnail_retailer_id=catalog.thumbnail_product_retailer_id if catalog else None,
     )
 
     try:

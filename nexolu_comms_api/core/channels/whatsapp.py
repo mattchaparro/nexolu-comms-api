@@ -40,7 +40,7 @@ class WhatsAppChannel(ChannelSender):
         if app.whatsapp is None:
             return ChannelSendResult(status=STATUS_SKIPPED, error="WhatsApp no configurado para esta app.")
 
-        payload = self._build_payload(message)
+        payload = self._build_payload(message, default_catalog_id=app.whatsapp.catalog_id)
         if payload is None:
             return ChannelSendResult(status=STATUS_FAILED, error="El mensaje no trae texto ni plantilla para WhatsApp.")
 
@@ -101,7 +101,81 @@ class WhatsAppChannel(ChannelSender):
 
         return response, None
 
-    def _build_payload(self, message: OutboundMessage) -> dict | None:
+    def _build_payload(self, message: OutboundMessage, default_catalog_id: str | None = None) -> dict | None:
+        catalog_id = message.catalog_id or default_catalog_id
+
+        if message.product_retailer_id:
+            # SPM (analisis H.2). catalog_id es obligatorio en el payload.
+            if not catalog_id:
+                return None
+            interactive: dict = {
+                "type": "product",
+                "action": {"catalog_id": catalog_id, "product_retailer_id": message.product_retailer_id},
+            }
+            if message.text:
+                interactive["body"] = {"text": message.text}
+            if message.product_footer:
+                interactive["footer"] = {"text": message.product_footer}
+            return {
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": message.to,
+                "type": "interactive",
+                "interactive": interactive,
+            }
+
+        if message.product_sections:
+            # MPM (analisis H.3): header y body obligatorios, max 30 items.
+            if not catalog_id:
+                return None
+            interactive = {
+                "type": "product_list",
+                "header": {"type": "text", "text": message.product_header or ""},
+                "body": {"text": message.text or ""},
+                "action": {
+                    "catalog_id": catalog_id,
+                    "sections": [
+                        {
+                            "title": section.get("title", ""),
+                            "product_items": [
+                                {"product_retailer_id": rid}
+                                for rid in section.get("product_retailer_ids", [])
+                            ],
+                        }
+                        for section in message.product_sections
+                    ],
+                },
+            }
+            if message.product_footer:
+                interactive["footer"] = {"text": message.product_footer}
+            return {
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": message.to,
+                "type": "interactive",
+                "interactive": interactive,
+            }
+
+        if message.send_catalog:
+            # Catalogo completo (analisis H.4): body max 1024, footer max 60.
+            parameters: dict = {}
+            if message.catalog_thumbnail_retailer_id:
+                parameters["thumbnail_product_retailer_id"] = message.catalog_thumbnail_retailer_id
+            interactive = {
+                "type": "catalog_message",
+                "body": {"text": (message.text or "")[:1024]},
+                "action": {"name": "catalog_message", "parameters": parameters},
+            }
+            if message.product_footer:
+                interactive["footer"] = {"text": message.product_footer[:60]}
+            return {
+                "messaging_product": "whatsapp",
+                "recipient_type": "individual",
+                "to": message.to,
+                "type": "interactive",
+                "interactive": interactive,
+            }
+
         if message.flow_id:
             return {
                 "messaging_product": "whatsapp",

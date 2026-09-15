@@ -376,6 +376,49 @@ class FlowSession(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class CatalogItem(Base):
+    """Estado de sincronizacion de UN producto contra el catalogo de Meta.
+
+    La fuente de verdad del producto es la app duena (principio 45 del
+    brief: el catalogo de Meta es una superficie comercial del catalogo de
+    Nexolu). Esta tabla guarda que se mando, con que `content_hash` (para
+    no re-enviar lo que no cambio: el rate limit oficial es ~100 llamadas
+    de batch por hora por catalogo) y en que quedo: `pending` (batch
+    enviado, con `batch_handle` para check_batch_request_status), `synced`,
+    o `error` con el motivo que reporto Meta.
+
+    `retailer_id` es EL identificador del producto en todo el circuito: el
+    `id` del items_batch, el `product_retailer_id` del webhook `order` y el
+    de los mensajes SPM/MPM."""
+
+    __tablename__ = "catalog_items"
+    __table_args__ = (
+        UniqueConstraint("catalog_id", "retailer_id", name="uq_catalog_item_identity"),
+        Index("ix_catalog_items_app", "app_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    app_id: Mapped[str] = mapped_column(String(64))
+    business_channel_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    catalog_id: Mapped[str] = mapped_column(String(64))
+    retailer_id: Mapped[str] = mapped_column(String(191))
+    title: Mapped[str] = mapped_column(String(191), default="")
+    description: Mapped[str] = mapped_column(Text, default="")
+    # Formato oficial del batch: "<monto> <moneda>", p.ej. "9000 COP".
+    price: Mapped[str] = mapped_column(String(32), default="")
+    availability: Mapped[str] = mapped_column(String(16), default="in stock")  # in stock | out of stock
+    image_link: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    link: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    brand: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    content_hash: Mapped[str] = mapped_column(String(64), default="")
+    sync_status: Mapped[str] = mapped_column(String(16), default="pending")  # pending | synced | error
+    batch_handle: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class IdempotencyRecord(Base):
     """Respuesta ya emitida para un `Idempotency-Key` de una app.
 

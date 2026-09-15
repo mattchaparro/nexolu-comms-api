@@ -72,6 +72,8 @@ async def configure_meta_whatsapp(
         "waba_id": payload.waba_id,
         "callback_url": payload.callback_url,
         "enforce_meta_signature": payload.enforce_meta_signature,
+        "catalog_id": payload.catalog_id,
+        "meta_business_id": payload.meta_business_id,
     }
     secrets = {
         "access_token": payload.access_token,
