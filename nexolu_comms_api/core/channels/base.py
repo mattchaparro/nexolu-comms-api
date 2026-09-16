@@ -62,6 +62,17 @@ class OutboundMessage:
     # Catalogo completo (interactive.catalog_message)
     send_catalog: bool = False
     catalog_thumbnail_retailer_id: str | None = None
+    # Multimedia por LINK publico (Meta lo descarga por su cuenta, nunca se
+    # le suben bytes): image | video | audio | document. `caption` aplica a
+    # image/video/document; `filename` solo a document.
+    media_kind: str | None = None
+    media_url: str | None = None
+    media_caption: str | None = None
+    media_filename: str | None = None
+    # Mensaje de lista (interactive.list): un menu de hasta 10 opciones.
+    # `list_button` es el texto del boton que despliega la lista (max 20).
+    list_button: str | None = None
+    list_rows: list[dict[str, str]] = field(default_factory=list)  # {"id","title","description"?}
 
 
 @dataclass(frozen=True)

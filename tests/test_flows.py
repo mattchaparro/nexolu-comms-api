@@ -470,6 +470,184 @@ def test_a_new_flow_supersedes_a_waiting_delay(client, platform_headers, auth_he
     assert len(httpx_mock.get_requests(url=MESSAGES_URL)) == 2
 
 
+# --- motor v2: random (aleatorizador A/B) -------------------------------------
+
+RANDOM_FLOW = {
+    "start": "hola",
+    "nodes": {
+        "hola": {"type": "message", "text": "¡Hola!", "next": "dado"},
+        "dado": {
+            "type": "random",
+            "branches": [{"weight": 1, "next": "a"}, {"weight": 1, "next": "b"}],
+        },
+        "a": {"type": "message", "text": "Promo A"},
+        "b": {"type": "message", "text": "Promo B"},
+    },
+}
+
+
+def test_pick_random_branch_respects_weights():
+    from nexolu_comms_api.core.flows.engine import _pick_random_branch
+
+    node = {
+        "type": "random",
+        "branches": [{"weight": 1, "next": "raro"}, {"weight": 999999, "next": "casi_siempre"}],
+    }
+    picks = {_pick_random_branch(node) for _ in range(50)}
+    assert "casi_siempre" in picks
+    # Una rama sin next termina el flujo.
+    assert _pick_random_branch({"branches": [{"weight": 1}]}) is None
+
+
+@pytest.mark.parametrize(
+    ("definition", "expected"),
+    [
+        ({"start": "r", "nodes": {"r": {"type": "random"}}}, "branches"),
+        (
+            {"start": "r", "nodes": {"r": {"type": "random", "branches": [{"weight": 1}]}}},
+            "entre 2 y 5",
+        ),
+        (
+            {
+                "start": "r",
+                "nodes": {"r": {"type": "random", "branches": [{"weight": 0, "next": "r"}, {"weight": 1}]}},
+            },
+            "weight",
+        ),
+        (
+            {
+                "start": "r",
+                "nodes": {"r": {"type": "random", "branches": [{"weight": 1, "next": "nope"}, {"weight": 1}]}},
+            },
+            "inexistente",
+        ),
+    ],
+)
+def test_validate_rejects_broken_random_nodes(definition, expected):
+    with pytest.raises(FlowDefinitionError, match=expected):
+        validate_definition(definition)
+
+
+def test_random_node_picks_a_branch_end_to_end(client, platform_headers, auth_headers, httpx_mock):
+    _create_flow(client, platform_headers, name="ab_promo", definition=RANDOM_FLOW)
+
+    httpx_mock.add_response(url=MESSAGES_URL, json={"messages": [{"id": "wamid.1"}]})
+    httpx_mock.add_response(url=MESSAGES_URL, json={"messages": [{"id": "wamid.2"}]})
+    response = _trigger(client, auth_headers, flow="ab_promo")
+
+    assert response.json()["status"] == "completed"
+    sent = [json.loads(r.content)["text"]["body"] for r in httpx_mock.get_requests(url=MESSAGES_URL)]
+    assert sent[0] == "¡Hola!"
+    assert sent[1] in ("Promo A", "Promo B")
+
+
+# --- bloques de contenido de Meta: media, list, capture -----------------------
+
+CONTENT_FLOW = {
+    "start": "foto",
+    "nodes": {
+        "foto": {
+            "type": "media",
+            "kind": "image",
+            "url": "https://cdn.nexolu.co/promo/{{campana}}.jpg",
+            "caption": "Nuestra promo de {{campana}} 💅",
+            "next": "menu",
+        },
+        "menu": {
+            "type": "list",
+            "text": "¿Qué servicio te interesa?",
+            "button": "Ver servicios",
+            "rows": [
+                {"id": "semi", "title": "Semipermanente", "description": "Desde $45.000", "next": "nombre"},
+                {"id": "tradicional", "title": "Tradicional", "next": "nombre"},
+            ],
+        },
+        "nombre": {
+            "type": "capture",
+            "text": "¿A nombre de quién agendamos?",
+            "field": "nombre_cita",
+            "next": "gracias",
+        },
+        "gracias": {"type": "message", "text": "¡Listo, {{contact.name}}! Te contactamos ya."},
+    },
+}
+
+
+def _list_reply(row_id: str, title: str) -> dict:
+    body = json.loads(json.dumps(_button_reply(row_id, title)))
+    interactive = body["entry"][0]["changes"][0]["value"]["messages"][0]["interactive"]
+    interactive["type"] = "list_reply"
+    interactive["list_reply"] = interactive.pop("button_reply")
+    return body
+
+
+@pytest.mark.parametrize(
+    ("definition", "expected"),
+    [
+        ({"start": "m", "nodes": {"m": {"type": "media", "url": "https://x/y.jpg"}}}, "kind"),
+        ({"start": "m", "nodes": {"m": {"type": "media", "kind": "image"}}}, "url"),
+        ({"start": "l", "nodes": {"l": {"type": "list", "text": "x", "rows": []}}}, "1 y 10"),
+        (
+            {"start": "l", "nodes": {"l": {"type": "list", "text": "x", "rows": [{"id": "a"}]}}},
+            "title",
+        ),
+        (
+            {
+                "start": "l",
+                "nodes": {"l": {"type": "list", "text": "x", "rows": [{"id": "a", "title": "A", "next": "no"}]}},
+            },
+            "inexistente",
+        ),
+        ({"start": "c", "nodes": {"c": {"type": "capture", "text": "x"}}}, "field"),
+    ],
+)
+def test_validate_rejects_broken_content_nodes(definition, expected):
+    with pytest.raises(FlowDefinitionError, match=expected):
+        validate_definition(definition)
+
+
+def test_media_list_and_capture_end_to_end(client, platform_headers, auth_headers, httpx_mock):
+    """El circuito ManyChat completo: imagen -> menu de lista -> captura de
+    texto libre al custom field -> mensaje final."""
+    _create_flow(client, platform_headers, name="promo_servicios", definition=CONTENT_FLOW)
+
+    # 1. Trigger: sale la imagen (interpolada) y el menu de lista; la sesion espera.
+    httpx_mock.add_response(url=MESSAGES_URL, json={"messages": [{"id": "wamid.img"}]})
+    httpx_mock.add_response(url=MESSAGES_URL, json={"messages": [{"id": "wamid.list"}]})
+    response = _trigger(
+        client, auth_headers, flow="promo_servicios", variables={"campana": "septiembre"}
+    )
+    assert response.json()["status"] == "active"
+
+    image = json.loads(httpx_mock.get_requests(url=MESSAGES_URL)[0].content)
+    assert image["type"] == "image"
+    assert image["image"]["link"] == "https://cdn.nexolu.co/promo/septiembre.jpg"
+    assert "septiembre" in image["image"]["caption"]
+
+    lista = json.loads(httpx_mock.get_requests(url=MESSAGES_URL)[1].content)
+    assert lista["interactive"]["type"] == "list"
+    assert lista["interactive"]["action"]["button"] == "Ver servicios"
+    rows = lista["interactive"]["action"]["sections"][0]["rows"]
+    assert rows[0] == {"id": "semi", "title": "Semipermanente", "description": "Desde $45.000"}
+
+    # 2. Elige de la lista (list_reply): sale la pregunta de captura.
+    httpx_mock.add_response(url=MESSAGES_URL, json={"messages": [{"id": "wamid.q"}]})
+    assert _inbound(client, httpx_mock, _list_reply("semi", "Semipermanente")).status_code == 200
+    pregunta = json.loads(httpx_mock.get_requests(url=MESSAGES_URL)[2].content)
+    assert "nombre" in pregunta["text"]["body"]
+
+    # 3. Responde texto libre: queda en el custom field y sigue el flujo.
+    httpx_mock.add_response(url=MESSAGES_URL, json={"messages": [{"id": "wamid.fin"}]})
+    assert _inbound(client, httpx_mock, _text_message("Carolina Restrepo")).status_code == 200
+
+    contacts = client.get("/v1/admin/contacts", headers=platform_headers).json()["items"]
+    contact = next(c for c in contacts if c["phone"] == "573001112233")
+    assert contact["fields"]["nombre_cita"] == "Carolina Restrepo"
+
+    final = json.loads(httpx_mock.get_requests(url=MESSAGES_URL)[3].content)
+    assert final["text"]["body"].startswith("¡Listo, Laura!")
+
+
 def test_flow_sends_are_audited_as_notifications(client, platform_headers, auth_headers, httpx_mock):
     _create_flow(client, platform_headers)
     httpx_mock.add_response(url=MESSAGES_URL, json={"messages": [{"id": "wamid.menu"}]})

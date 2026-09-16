@@ -42,6 +42,23 @@ simple que no exista ahi se busca en `contact.fields` (los custom fields).
 mensaje entrante durante el delay NO lo interrumpe (la conversacion es de
 la app), pero un flujo nuevo del mismo contacto si lo reemplaza.
 
+`random` (el aleatorizador A/B): no envia nada, tira un dado ponderado y
+sigue por la rama elegida. `branches` = lista de 2 a 5 objetos
+`{"weight": <entero>=1>, "next": <nodo o null>}`; se re-tira en cada
+corrida (un split pegajoso por contacto se logra con un tag).
+
+Los bloques de contenido de Meta (paridad con el modulo de mensaje de
+ManyChat):
+  `media`   {"kind": "image|video|audio|document", "url": <link publico>,
+             "caption"?, "filename"?, "next"?} - Meta descarga el archivo.
+  `list`    {"text", "button"?, "rows": [{"id","title","description"?,
+             "next"?}] (1-10)} - menu interactive.list; ESPERA la eleccion
+             como `buttons` (list_reply o el titulo escrito).
+  `capture` {"text", "field", "next"?} - pregunta y ESPERA: el siguiente
+             texto libre del contacto queda en contact.fields[field]
+             (la "Recopilacion de datos" de ManyChat). Un mensaje sin
+             texto no cuenta; sigue esperando.
+
 La clave raiz `ui` (posiciones del builder visual del panel) se guarda con
 la definicion y el motor la ignora por completo.
 
@@ -66,6 +83,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import random
 import re
 from datetime import datetime, timedelta
 from typing import Any
@@ -89,12 +107,34 @@ MAX_NODES_PER_RUN = 20
 
 SESSION_TTL_HOURS = 24
 
-VALID_NODE_TYPES = ("message", "buttons", "cta_url", "condition", "delay")
+VALID_NODE_TYPES = (
+    "message",
+    "buttons",
+    "cta_url",
+    "condition",
+    "delay",
+    "random",
+    "media",
+    "list",
+    "capture",
+)
 
-# Nodos que envian un mensaje (y por eso exigen 'text').
-SENDING_NODE_TYPES = ("message", "buttons", "cta_url")
+# Nodos que envian un mensaje CON texto obligatorio ('media' tambien envia,
+# pero su contenido es el archivo y el caption es opcional).
+SENDING_NODE_TYPES = ("message", "buttons", "cta_url", "list", "capture")
+
+# Nodos que dejan la sesion esperando la respuesta del contacto.
+WAITING_NODE_TYPES = ("buttons", "list", "capture")
+
+MEDIA_KINDS = ("image", "video", "audio", "document")
+
+MAX_LIST_ROWS = 10  # regla de Meta para interactive.list
 
 MAX_DELAY_MINUTES = 20160  # 14 dias: mas alla, es una campana, no un flujo.
+
+# Aleatorizador: entre 2 y 5 ramas (regla practica de ManyChat; mas ramas
+# es senal de que el flujo necesita una condicion, no un dado).
+MAX_RANDOM_BRANCHES = 5
 
 _CONDITION_OPS = ("equals", "not_equals", "contains", "exists")
 
@@ -151,6 +191,52 @@ def validate_definition(definition: dict[str, Any]) -> None:
                 raise FlowDefinitionError(
                     f"El nodo '{node_id}' (delay) necesita 'minutes' entero entre 1 y {MAX_DELAY_MINUTES}."
                 )
+
+        if node_type == "media":
+            if node.get("kind") not in MEDIA_KINDS:
+                raise FlowDefinitionError(
+                    f"El nodo '{node_id}' (media) necesita 'kind' en: {', '.join(MEDIA_KINDS)}."
+                )
+            if not node.get("url"):
+                raise FlowDefinitionError(f"El nodo '{node_id}' (media) necesita 'url' publica.")
+
+        if node_type == "list":
+            rows = node.get("rows")
+            if not isinstance(rows, list) or not (1 <= len(rows) <= MAX_LIST_ROWS):
+                raise FlowDefinitionError(
+                    f"El nodo '{node_id}' (list) necesita entre 1 y {MAX_LIST_ROWS} 'rows' (regla de Meta)."
+                )
+            for row in rows:
+                if not (isinstance(row, dict) and row.get("id") and row.get("title")):
+                    raise FlowDefinitionError(f"Una fila de '{node_id}' necesita 'id' y 'title'.")
+                if row.get("next") is not None and row["next"] not in nodes:
+                    raise FlowDefinitionError(
+                        f"La fila '{row.get('id')}' de '{node_id}' apunta a nodo inexistente."
+                    )
+
+        if node_type == "capture" and not node.get("field"):
+            raise FlowDefinitionError(
+                f"El nodo '{node_id}' (capture) necesita 'field': el custom field donde guardar la respuesta."
+            )
+
+        if node_type == "random":
+            branches = node.get("branches")
+            if not isinstance(branches, list) or not (2 <= len(branches) <= MAX_RANDOM_BRANCHES):
+                raise FlowDefinitionError(
+                    f"El nodo '{node_id}' (random) necesita entre 2 y {MAX_RANDOM_BRANCHES} 'branches'."
+                )
+            for index, branch in enumerate(branches):
+                if not isinstance(branch, dict):
+                    raise FlowDefinitionError(f"La rama {index} de '{node_id}' no es un objeto.")
+                weight = branch.get("weight")
+                if not isinstance(weight, int) or weight < 1:
+                    raise FlowDefinitionError(
+                        f"La rama {index} de '{node_id}' necesita 'weight' entero >= 1."
+                    )
+                if branch.get("next") is not None and branch["next"] not in nodes:
+                    raise FlowDefinitionError(
+                        f"La rama {index} de '{node_id}' apunta a nodo inexistente: {branch['next']!r}."
+                    )
 
 
 def _validate_condition(node_id: str, node: dict[str, Any], nodes: dict[str, Any]) -> None:
@@ -316,6 +402,13 @@ class FlowRunner:
                 node_id = node.get("then") if _evaluate_condition(node, context) else node.get("else")
                 continue
 
+            if node["type"] == "random":
+                # Aleatorizador (A/B de ManyChat): tira el dado ponderado y
+                # sigue. Se re-tira en cada corrida a proposito - un split
+                # pegajoso por contacto seria un tag, no un dado.
+                node_id = _pick_random_branch(node)
+                continue
+
             if node["type"] == "delay":
                 next_id = node.get("next")
                 if next_id is None:
@@ -330,8 +423,9 @@ class FlowRunner:
 
             await self._send_node(node, context)
 
-            if node["type"] == "buttons":
-                # Parada: la sesion queda esperando la respuesta aqui.
+            if node["type"] in WAITING_NODE_TYPES:
+                # Parada: la sesion queda esperando la respuesta aqui
+                # (boton, opcion de la lista, o el texto libre de capture).
                 flow_session.current_node = node_id
                 flow_session.status = "active"
                 flow_session.resume_at = None
@@ -351,6 +445,7 @@ class FlowRunner:
         await self._session.commit()
 
     async def _send_node(self, node: dict[str, Any], context: dict[str, Any]) -> None:
+        node_type = node["type"]
         text = interpolate(str(node.get("text", "")), context)
         message = OutboundMessage(
             to=self._contact.phone,
@@ -362,10 +457,31 @@ class FlowRunner:
                 {"id": str(b["id"]), "title": interpolate(str(b["title"]), context)}
                 for b in node.get("buttons", [])
             ]
-            if node["type"] == "buttons"
+            if node_type == "buttons"
             else [],
-            cta_url=interpolate(str(node["url"]), context) if node["type"] == "cta_url" else None,
-            cta_title=str(node.get("button", "Abrir")) if node["type"] == "cta_url" else None,
+            cta_url=interpolate(str(node["url"]), context) if node_type == "cta_url" else None,
+            cta_title=str(node.get("button", "Abrir")) if node_type == "cta_url" else None,
+            media_kind=str(node["kind"]) if node_type == "media" else None,
+            media_url=interpolate(str(node["url"]), context) if node_type == "media" else None,
+            media_caption=interpolate(str(node.get("caption", "")), context) or None
+            if node_type == "media"
+            else None,
+            media_filename=str(node.get("filename", "")) or None if node_type == "media" else None,
+            list_button=str(node.get("button", "")) or None if node_type == "list" else None,
+            list_rows=[
+                {
+                    "id": str(r["id"]),
+                    "title": interpolate(str(r["title"]), context),
+                    **(
+                        {"description": interpolate(str(r["description"]), context)}
+                        if r.get("description")
+                        else {}
+                    ),
+                }
+                for r in node.get("rows", [])
+            ]
+            if node_type == "list"
+            else [],
         )
 
         identity, _ = await resolve_whatsapp_identity(
@@ -392,6 +508,18 @@ class FlowRunner:
                 "flows.send_failed",
                 extra={"flow_id": self._flow.id, "contact_id": self._contact.id, "error": result.error},
             )
+
+
+def _pick_random_branch(node: dict[str, Any]) -> str | None:
+    """El dado ponderado del aleatorizador. @return el `next` de la rama
+    elegida (None = esa rama termina el flujo)."""
+    branches = [b for b in node.get("branches", []) if isinstance(b, dict)]
+    if not branches:
+        return None
+    weights = [max(1, int(b.get("weight", 1))) for b in branches]
+    chosen = random.choices(branches, weights=weights, k=1)[0]
+    target = chosen.get("next")
+    return str(target) if target else None
 
 
 def _contact_context(contact: Contact) -> dict[str, Any]:
@@ -502,7 +630,19 @@ async def _handle_inbound_event(event_id: str) -> None:
                 await session.commit()
                 return
             node = flow.definition.get("nodes", {}).get(active.current_node, {})
-            chosen = _match_button(node, button_id, text)
+
+            if node.get("type") == "capture":
+                # Recopilacion de datos: CUALQUIER texto es la respuesta y
+                # queda en el custom field del contacto. Un mensaje sin
+                # texto (sticker, audio) no cuenta: se sigue esperando.
+                if not text:
+                    await session.commit()
+                    return
+                contact.fields = {**contact.fields, str(node.get("field")): text.strip()}
+                await FlowRunner(session, app, flow, contact).run_from(active, node.get("next"))
+                return
+
+            chosen = _match_choice(node, button_id, text)
             if chosen is None:
                 # Respondio otra cosa: la conversacion es de la app duena,
                 # el motor no insiste. La sesion sigue esperando.
@@ -535,15 +675,17 @@ async def _handle_inbound_event(event_id: str) -> None:
         await session.commit()
 
 
-def _match_button(
-    node: dict[str, Any], button_id: str | None, text: str | None
+def _match_choice(
+    node: dict[str, Any], choice_id: str | None, text: str | None
 ) -> dict[str, Any] | None:
-    for button in node.get("buttons", []):
-        if button_id and str(button.get("id")) == button_id:
-            return button
-        # Tolerancia: el usuario escribio el titulo en vez de tocar el boton.
-        if text and str(button.get("title", "")).strip().lower() == text.strip().lower():
-            return button
+    """La opcion elegida en un nodo que espera: boton de `buttons` o fila
+    de `list`. Mismo contrato: {id, title, next?}."""
+    for option in [*node.get("buttons", []), *node.get("rows", [])]:
+        if choice_id and str(option.get("id")) == choice_id:
+            return option
+        # Tolerancia: el usuario escribio el titulo en vez de tocar la opcion.
+        if text and str(option.get("title", "")).strip().lower() == text.strip().lower():
+            return option
     return None
 
 
@@ -567,7 +709,9 @@ def _parse_inbound(payload: str) -> tuple[str, str | None, str | None, str] | No
         text = str((message.get("text") or {}).get("body") or "")
     elif message.get("type") == "interactive":
         interactive = message.get("interactive") or {}
-        reply = interactive.get("button_reply") or {}
+        # button_reply (botones) o list_reply (mensaje de lista): mismo
+        # contrato {id, title} para el motor.
+        reply = interactive.get("button_reply") or interactive.get("list_reply") or {}
         button_id = str(reply.get("id")) if reply.get("id") else None
         text = str(reply.get("title")) if reply.get("title") else None
     elif message.get("type") == "button":

@@ -201,6 +201,46 @@ class WhatsAppChannel(ChannelSender):
                 },
             }
 
+        if message.media_kind and message.media_url:
+            # Payload oficial de media por link: {"type":"image","image":
+            # {"link":...,"caption":...}}. Meta descarga el archivo; si el
+            # link no es publico el mensaje falla alla, no aca.
+            media: dict = {"link": message.media_url}
+            if message.media_caption and message.media_kind in ("image", "video", "document"):
+                media["caption"] = message.media_caption
+            if message.media_filename and message.media_kind == "document":
+                media["filename"] = message.media_filename
+            return {
+                "messaging_product": "whatsapp",
+                "to": message.to,
+                "type": message.media_kind,
+                message.media_kind: media,
+            }
+
+        if message.list_rows:
+            # interactive.list (analisis A.4): hasta 10 filas; titulos max
+            # 24 y descripciones max 72 - se recortan aca en vez de dejar
+            # que Meta rechace el mensaje completo.
+            rows = []
+            for row in message.list_rows[:10]:
+                item: dict = {"id": row["id"], "title": row["title"][:24]}
+                if row.get("description"):
+                    item["description"] = row["description"][:72]
+                rows.append(item)
+            return {
+                "messaging_product": "whatsapp",
+                "to": message.to,
+                "type": "interactive",
+                "interactive": {
+                    "type": "list",
+                    "body": {"text": message.text or ""},
+                    "action": {
+                        "button": (message.list_button or "Ver opciones")[:20],
+                        "sections": [{"title": (message.list_button or "Opciones")[:24], "rows": rows}],
+                    },
+                },
+            }
+
         if message.template_name:
             return {
                 "messaging_product": "whatsapp",
