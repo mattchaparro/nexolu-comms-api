@@ -24,9 +24,26 @@ conversacion.
 Tipos de nodo: `message` (texto, sigue solo por `next`), `buttons` (hasta 3
 - regla de Meta - y ESPERA la respuesta: la sesion queda parada ahi),
 `cta_url` (boton que abre un link - la accion de negocio real vive en la
-web/app duena, no aca). Todo nodo puede ademas `add_tags`/`remove_tags`/
+web/app duena, no aca), `condition` (no envia nada: evalua `when` sobre el
+contacto/contexto y sigue por `then` o `else`) y `delay` (no envia nada:
+la sesion queda `waiting` con `resume_at` y el worker de reanudacion sigue
+por `next` cuando vence). Todo nodo puede ademas `add_tags`/`remove_tags`/
 `set_fields` sobre el contacto. `{{...}}` interpola contra el contexto de
 la sesion (variables del trigger + `contact.*`).
+
+`condition.when` acepta exactamente UNA de estas formas:
+  {"tag": "vip"} / {"not_tag": "vip"}          - tiene / no tiene el tag
+  {"field": "x", "equals": "y"}                - tambien not_equals, contains
+  {"field": "x", "exists": true}               - tiene valor no vacio
+`field` es una ruta del contexto (`fecha`, `contact.name`...); un nombre
+simple que no exista ahi se busca en `contact.fields` (los custom fields).
+
+`delay` lleva `minutes` (1 a 20160 = 14 dias). ManyChat-semantica: un
+mensaje entrante durante el delay NO lo interrumpe (la conversacion es de
+la app), pero un flujo nuevo del mismo contacto si lo reemplaza.
+
+La clave raiz `ui` (posiciones del builder visual del panel) se guarda con
+la definicion y el motor la ignora por completo.
 
 ## Las dos entradas
 
@@ -46,6 +63,7 @@ anterior del contacto - el flujo mas reciente gana, como en ManyChat.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -71,7 +89,14 @@ MAX_NODES_PER_RUN = 20
 
 SESSION_TTL_HOURS = 24
 
-VALID_NODE_TYPES = ("message", "buttons", "cta_url")
+VALID_NODE_TYPES = ("message", "buttons", "cta_url", "condition", "delay")
+
+# Nodos que envian un mensaje (y por eso exigen 'text').
+SENDING_NODE_TYPES = ("message", "buttons", "cta_url")
+
+MAX_DELAY_MINUTES = 20160  # 14 dias: mas alla, es una campana, no un flujo.
+
+_CONDITION_OPS = ("equals", "not_equals", "contains", "exists")
 
 
 class FlowDefinitionError(ValueError):
@@ -96,7 +121,7 @@ def validate_definition(definition: dict[str, Any]) -> None:
             raise FlowDefinitionError(
                 f"El nodo '{node_id}' tiene type {node_type!r}; validos: {', '.join(VALID_NODE_TYPES)}."
             )
-        if not node.get("text"):
+        if node_type in SENDING_NODE_TYPES and not node.get("text"):
             raise FlowDefinitionError(f"El nodo '{node_id}' necesita 'text'.")
         if node.get("next") is not None and node["next"] not in nodes:
             raise FlowDefinitionError(f"El nodo '{node_id}' apunta a 'next' inexistente: {node['next']!r}.")
@@ -117,25 +142,99 @@ def validate_definition(definition: dict[str, Any]) -> None:
         if node_type == "cta_url" and not node.get("url"):
             raise FlowDefinitionError(f"El nodo '{node_id}' (cta_url) necesita 'url'.")
 
+        if node_type == "condition":
+            _validate_condition(node_id, node, nodes)
+
+        if node_type == "delay":
+            minutes = node.get("minutes")
+            if not isinstance(minutes, int) or not (1 <= minutes <= MAX_DELAY_MINUTES):
+                raise FlowDefinitionError(
+                    f"El nodo '{node_id}' (delay) necesita 'minutes' entero entre 1 y {MAX_DELAY_MINUTES}."
+                )
+
+
+def _validate_condition(node_id: str, node: dict[str, Any], nodes: dict[str, Any]) -> None:
+    when = node.get("when")
+    if not isinstance(when, dict) or not when:
+        raise FlowDefinitionError(f"El nodo '{node_id}' (condition) necesita 'when'.")
+
+    has_tag = "tag" in when or "not_tag" in when
+    ops = [op for op in _CONDITION_OPS if op in when]
+    if has_tag:
+        if len(when) != 1:
+            raise FlowDefinitionError(
+                f"El 'when' de '{node_id}' con tag/not_tag no admite otras claves."
+            )
+    else:
+        if not when.get("field") or len(ops) != 1:
+            raise FlowDefinitionError(
+                f"El 'when' de '{node_id}' necesita 'tag'/'not_tag', o 'field' con exactamente "
+                f"una de: {', '.join(_CONDITION_OPS)}."
+            )
+
+    if not node.get("then") and not node.get("else"):
+        raise FlowDefinitionError(
+            f"El nodo '{node_id}' (condition) necesita al menos una rama 'then' o 'else'."
+        )
+    for branch in ("then", "else"):
+        if node.get(branch) is not None and node[branch] not in nodes:
+            raise FlowDefinitionError(
+                f"La rama '{branch}' de '{node_id}' apunta a nodo inexistente: {node[branch]!r}."
+            )
+
 
 _PLACEHOLDER = re.compile(r"\{\{\s*([a-zA-Z0-9_.]+)\s*\}\}")
+
+
+def resolve_context_value(path: str, context: dict[str, Any]) -> str:
+    """Ruta con puntos contra el contexto (`fecha`, `contact.name`...).
+    Lo inexistente resuelve a cadena vacia."""
+    value: Any = context
+    for part in path.split("."):
+        if isinstance(value, dict) and part in value:
+            value = value[part]
+        else:
+            return ""
+    return "" if value is None else str(value)
 
 
 def interpolate(text: str, context: dict[str, Any]) -> str:
     """`{{fecha}}`, `{{contact.name}}`... contra el contexto. Lo que no
     exista se reemplaza por cadena vacia - un mensaje con un hueco es mejor
     que un `{{fecha}}` literal delante del cliente."""
+    return _PLACEHOLDER.sub(lambda m: resolve_context_value(m.group(1), context), text)
 
-    def resolve(match: re.Match[str]) -> str:
-        value: Any = context
-        for part in match.group(1).split("."):
-            if isinstance(value, dict) and part in value:
-                value = value[part]
-            else:
-                return ""
-        return "" if value is None else str(value)
 
-    return _PLACEHOLDER.sub(resolve, text)
+def _evaluate_condition(node: dict[str, Any], context: dict[str, Any]) -> bool:
+    """El `when` de un nodo condition, contra el mismo contexto que la
+    interpolacion. Comparaciones de texto: sin mayusculas ni espacios en
+    los bordes - 'Cali ' y 'cali' son la misma respuesta de un humano."""
+    when = node.get("when") or {}
+    tags = [str(t) for t in (context.get("contact") or {}).get("tags") or []]
+
+    if "tag" in when:
+        return str(when["tag"]) in tags
+    if "not_tag" in when:
+        return str(when["not_tag"]) not in tags
+
+    path = str(when.get("field", ""))
+    value = resolve_context_value(path, context)
+    if value == "" and "." not in path:
+        # Nombre simple que no esta en el contexto: es un custom field.
+        value = resolve_context_value(f"contact.fields.{path}", context)
+
+    def norm(raw: Any) -> str:
+        return str(raw).strip().lower()
+
+    if "equals" in when:
+        return norm(value) == norm(when["equals"])
+    if "not_equals" in when:
+        return norm(value) != norm(when["not_equals"])
+    if "contains" in when:
+        return norm(when["contains"]) in norm(value)
+    if "exists" in when:
+        return (value != "") is bool(when["exists"])
+    return False
 
 
 class ContactRepository:
@@ -209,12 +308,33 @@ class FlowRunner:
 
             context = {**flow_session.context, "contact": _contact_context(self._contact)}
             _apply_node_effects(self._contact, node, context)
+
+            if node["type"] == "condition":
+                # No envia nada: solo decide la rama. El contexto se rearma
+                # en la proxima vuelta, ya con los tags/fields del nodo.
+                context = {**flow_session.context, "contact": _contact_context(self._contact)}
+                node_id = node.get("then") if _evaluate_condition(node, context) else node.get("else")
+                continue
+
+            if node["type"] == "delay":
+                next_id = node.get("next")
+                if next_id is None:
+                    # Un delay sin continuacion no espera nada.
+                    break
+                flow_session.current_node = next_id
+                flow_session.status = "waiting"
+                flow_session.resume_at = datetime.utcnow() + timedelta(minutes=int(node["minutes"]))
+                flow_session.updated_at = datetime.utcnow()
+                await self._session.commit()
+                return
+
             await self._send_node(node, context)
 
             if node["type"] == "buttons":
                 # Parada: la sesion queda esperando la respuesta aqui.
                 flow_session.current_node = node_id
                 flow_session.status = "active"
+                flow_session.resume_at = None
                 flow_session.updated_at = datetime.utcnow()
                 await self._session.commit()
                 return
@@ -226,6 +346,7 @@ class FlowRunner:
 
         flow_session.current_node = None
         flow_session.status = "completed"
+        flow_session.resume_at = None
         flow_session.updated_at = datetime.utcnow()
         await self._session.commit()
 
@@ -292,11 +413,13 @@ async def start_flow(
     )
     await session.flush()
 
-    # El flujo mas reciente gana: una sola sesion activa por contacto.
+    # El flujo mas reciente gana: una sola sesion viva por contacto
+    # (activa esperando botones o waiting en un delay).
     stale = (
         await session.execute(
             select(FlowSession).where(
-                FlowSession.contact_id == contact.id, FlowSession.status == "active"
+                FlowSession.contact_id == contact.id,
+                FlowSession.status.in_(["active", "waiting"]),
             )
         )
     ).scalars()
@@ -454,3 +577,68 @@ def _parse_inbound(payload: str) -> tuple[str, str | None, str | None, str] | No
         button_id = str(reply.get("payload")) if reply.get("payload") else None
 
     return phone, text, button_id, profile_name
+
+
+async def resume_due_sessions() -> int:
+    """Retoma las sesiones `waiting` con el delay vencido. Cada sesion se
+    procesa aislada: una que falle no bloquea a las demas.
+    @return cuantas se intentaron."""
+    now = datetime.utcnow()
+    async with get_sessionmaker()() as session:
+        result = await session.execute(
+            select(FlowSession.id)
+            .where(FlowSession.status == "waiting", FlowSession.resume_at <= now)
+            .order_by(FlowSession.resume_at)
+            .limit(50)
+        )
+        due = [row[0] for row in result]
+
+    for session_id in due:
+        try:
+            await _resume_session(session_id)
+        except Exception:
+            logger.exception("flows.resume_error", extra={"session_id": session_id})
+            # Marcarla expirada evita reintentarla en caliente cada tick;
+            # el detalle ya quedo en el log.
+            async with get_sessionmaker()() as session:
+                broken = await session.get(FlowSession, session_id)
+                if broken is not None and broken.status == "waiting":
+                    broken.status = "expired"
+                    await session.commit()
+
+    return len(due)
+
+
+async def _resume_session(session_id: str) -> None:
+    async with get_sessionmaker()() as session:
+        flow_session = await session.get(FlowSession, session_id)
+        if flow_session is None or flow_session.status != "waiting":
+            return
+
+        flow = await session.get(Flow, flow_session.flow_id)
+        contact = await session.get(Contact, flow_session.contact_id)
+        app = await resolve_by_app_id(session, flow_session.app_id)
+        if flow is None or not flow.is_active or contact is None or app is None:
+            flow_session.status = "expired"
+            flow_session.resume_at = None
+            await session.commit()
+            return
+
+        node_id = flow_session.current_node
+        flow_session.resume_at = None
+        await FlowRunner(session, app, flow, contact).run_from(flow_session, node_id)
+
+
+async def flow_resume_worker_loop() -> None:
+    """Task de proceso (arrancada en el lifespan), calcada del worker de
+    reintento de webhooks: duerme, retoma lo vencido, y nunca muere en
+    silencio."""
+    from nexolu_comms_api.config import get_settings
+
+    settings = get_settings()
+    while True:
+        await asyncio.sleep(settings.flow_resume_interval_seconds)
+        try:
+            await resume_due_sessions()
+        except Exception:
+            logger.exception("flows.resume_worker_error")

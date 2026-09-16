@@ -187,6 +187,11 @@ class Settings(BaseSettings):
     webhook_retry_worker_enabled: bool = True
     webhook_retry_interval_seconds: int = 30
 
+    # Reanudacion de nodos `delay` del motor de flujos (mismo patron y
+    # mismas razones que el worker de arriba).
+    flow_resume_worker_enabled: bool = True
+    flow_resume_interval_seconds: int = 30
+
     # Registro de apps cliente, como JSON crudo (parseado en `apps`).
     nexolu_apps_json: str = "{}"
 

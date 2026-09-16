@@ -361,7 +361,10 @@ class FlowSession(Base):
     `superseded` - comportamiento ManyChat: el flujo mas reciente gana)."""
 
     __tablename__ = "flow_sessions"
-    __table_args__ = (Index("ix_flow_sessions_contact", "contact_id", "status"),)
+    __table_args__ = (
+        Index("ix_flow_sessions_contact", "contact_id", "status"),
+        Index("ix_flow_sessions_resume", "status", "resume_at"),
+    )
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
     flow_id: Mapped[str] = mapped_column(String(32))
@@ -370,8 +373,11 @@ class FlowSession(Base):
     business_id: Mapped[str] = mapped_column(String(64), default="")
     current_node: Mapped[str | None] = mapped_column(String(64), nullable=True)
     context: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
-    # active (esperando respuesta) | completed | superseded | expired
+    # active (esperando respuesta) | waiting (en un delay, ver resume_at)
+    # | completed | superseded | expired
     status: Mapped[str] = mapped_column(String(16), default="active")
+    # Solo con status=waiting: cuando el worker debe retomar en current_node.
+    resume_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

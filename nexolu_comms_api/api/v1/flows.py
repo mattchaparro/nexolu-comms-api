@@ -41,7 +41,7 @@ class TriggerFlowIn(BaseModel):
 
 class TriggerFlowOut(BaseModel):
     session_id: str
-    status: str  # active (esperando respuesta) | completed
+    status: str  # active (esperando respuesta) | waiting (en un delay) | completed
 
 
 @router.post("/trigger", response_model=TriggerFlowOut)

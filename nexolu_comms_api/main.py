@@ -28,6 +28,7 @@ from nexolu_comms_api.api.v1 import (
 )
 from nexolu_comms_api.config import get_settings
 from nexolu_comms_api.core.db.session import init_models
+from nexolu_comms_api.core.flows.engine import flow_resume_worker_loop
 from nexolu_comms_api.core.telemetry.logging import configure_logging
 from nexolu_comms_api.core.webhooks.forwarder import retry_worker_loop
 
@@ -45,16 +46,19 @@ async def lifespan(app: FastAPI):
 
     # Worker de reintento de webhooks: task del propio proceso, cancelada
     # limpiamente al apagar. Ver core/webhooks/forwarder.py.
-    retry_task: asyncio.Task | None = None
+    workers: list[asyncio.Task] = []
     if settings.webhook_retry_worker_enabled:
-        retry_task = asyncio.create_task(retry_worker_loop())
+        workers.append(asyncio.create_task(retry_worker_loop()))
+    # Reanuda los nodos `delay` de los flujos vencidos. Ver core/flows/engine.py.
+    if settings.flow_resume_worker_enabled:
+        workers.append(asyncio.create_task(flow_resume_worker_loop()))
 
     yield
 
-    if retry_task is not None:
-        retry_task.cancel()
+    for task in workers:
+        task.cancel()
         with suppress(asyncio.CancelledError):
-            await retry_task
+            await task
 
 
 def create_app() -> FastAPI:

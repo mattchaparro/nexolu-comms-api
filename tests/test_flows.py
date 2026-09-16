@@ -2,16 +2,26 @@
 una cita, dispara el flujo por API con variables, el cliente recibe
 botones (condiciones / garantias / gestionar en la web) y el motor
 atiende cada respuesta, dejando tags en el contacto. Tambien: disparo por
-keyword, interpolacion, validacion de definiciones y scoping."""
+keyword, interpolacion, validacion de definiciones, scoping, y los nodos
+`condition` (ramas por tag/field) y `delay` (waiting + worker de
+reanudacion) del motor v2."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
+from datetime import datetime, timedelta
 
 import pytest
 
-from nexolu_comms_api.core.flows.engine import FlowDefinitionError, interpolate, validate_definition
+from nexolu_comms_api.core.flows.engine import (
+    FlowDefinitionError,
+    _evaluate_condition,
+    interpolate,
+    resume_due_sessions,
+    validate_definition,
+)
 
 MESSAGES_URL = "https://graph.facebook.com/v21.0/123456/messages"
 # El webhook TAMBIEN reenvia el evento crudo al callback del POS (el motor
@@ -278,6 +288,186 @@ def test_a_broken_definition_bounces_at_save_time(client, platform_headers):
 
     assert response.status_code == 422
     assert "start" in response.json()["detail"]
+
+
+# --- motor v2: condition y delay ----------------------------------------------
+
+# Primer contacto: saluda y marca `vip`; el proximo disparo toma la otra rama.
+VIP_FLOW = {
+    "start": "decide",
+    "nodes": {
+        "decide": {"type": "condition", "when": {"tag": "vip"}, "then": "de_nuevo", "else": "primera"},
+        "primera": {"type": "message", "text": "Bienvenida por primera vez.", "add_tags": ["vip"]},
+        "de_nuevo": {"type": "message", "text": "Hola de nuevo, {{contact.name}}."},
+    },
+}
+
+DELAY_FLOW = {
+    "start": "confirmacion",
+    "nodes": {
+        "confirmacion": {"type": "message", "text": "Tu cita quedó agendada.", "next": "espera"},
+        "espera": {"type": "delay", "minutes": 60, "next": "recordatorio"},
+        "recordatorio": {"type": "message", "text": "¡Te esperamos mañana, {{contact.name}}!"},
+    },
+}
+
+
+@pytest.mark.parametrize(
+    ("when", "context", "expected"),
+    [
+        ({"tag": "vip"}, {"contact": {"tags": ["vip"]}}, True),
+        ({"tag": "vip"}, {"contact": {"tags": []}}, False),
+        ({"not_tag": "vip"}, {"contact": {"tags": []}}, True),
+        ({"field": "sede", "equals": " Norte "}, {"sede": "norte", "contact": {}}, True),
+        ({"field": "sede", "not_equals": "sur"}, {"sede": "norte", "contact": {}}, True),
+        ({"field": "contact.name", "contains": "lau"}, {"contact": {"name": "Laura"}}, True),
+        # Nombre simple que no esta en el contexto: cae a contact.fields.
+        ({"field": "ciudad", "equals": "cali"}, {"contact": {"fields": {"ciudad": "Cali"}}}, True),
+        ({"field": "ciudad", "exists": True}, {"contact": {"fields": {}}}, False),
+        ({"field": "ciudad", "exists": False}, {"contact": {"fields": {}}}, True),
+    ],
+)
+def test_condition_evaluation(when, context, expected):
+    assert _evaluate_condition({"type": "condition", "when": when}, context) is expected
+
+
+@pytest.mark.parametrize(
+    ("definition", "expected"),
+    [
+        # condition sin when / when invalido / sin ramas / rama fantasma.
+        (
+            {"start": "c", "nodes": {"c": {"type": "condition", "then": "c"}}},
+            "'when'",
+        ),
+        (
+            {"start": "c", "nodes": {"c": {"type": "condition", "when": {"tag": "x", "field": "y"}, "then": "c"}}},
+            "no admite otras claves",
+        ),
+        (
+            {"start": "c", "nodes": {"c": {"type": "condition", "when": {"field": "x"}, "then": "c"}}},
+            "exactamente",
+        ),
+        (
+            {"start": "c", "nodes": {"c": {"type": "condition", "when": {"tag": "x"}}}},
+            "al menos una rama",
+        ),
+        (
+            {"start": "c", "nodes": {"c": {"type": "condition", "when": {"tag": "x"}, "then": "nope"}}},
+            "inexistente",
+        ),
+        # delay sin minutes / fuera de rango.
+        (
+            {"start": "d", "nodes": {"d": {"type": "delay"}}},
+            "minutes",
+        ),
+        (
+            {"start": "d", "nodes": {"d": {"type": "delay", "minutes": 999999}}},
+            "minutes",
+        ),
+    ],
+)
+def test_validate_rejects_broken_v2_nodes(definition, expected):
+    with pytest.raises(FlowDefinitionError, match=expected):
+        validate_definition(definition)
+
+
+def test_validate_keeps_the_builder_ui_key():
+    definition = json.loads(json.dumps(VIP_FLOW))
+    definition["ui"] = {"positions": {"decide": {"x": 100, "y": 40}}}
+
+    validate_definition(definition)  # el motor la ignora, el panel la usa
+
+
+def test_condition_branches_by_tag_end_to_end(client, platform_headers, auth_headers, httpx_mock):
+    _create_flow(client, platform_headers, name="saludo_vip", definition=VIP_FLOW)
+
+    # Primer disparo: contacto sin tags -> rama else, y gana el tag vip.
+    httpx_mock.add_response(url=MESSAGES_URL, json={"messages": [{"id": "wamid.1"}]})
+    response = _trigger(client, auth_headers, flow="saludo_vip")
+    assert response.json()["status"] == "completed"
+    first = json.loads(httpx_mock.get_requests(url=MESSAGES_URL)[0].content)
+    assert first["text"]["body"] == "Bienvenida por primera vez."
+
+    # Segundo disparo: el tag ya esta -> rama then, con interpolacion.
+    httpx_mock.add_response(url=MESSAGES_URL, json={"messages": [{"id": "wamid.2"}]})
+    _trigger(client, auth_headers, flow="saludo_vip")
+    second = json.loads(httpx_mock.get_requests(url=MESSAGES_URL)[1].content)
+    assert second["text"]["body"] == "Hola de nuevo, Laura."
+
+
+def _force_resume(session_id: str | None = None) -> int:
+    """Vence el delay (resume_at al pasado) y corre el worker, como si
+    hubiera pasado la hora."""
+
+    async def inner() -> int:
+        from sqlalchemy import update
+
+        from nexolu_comms_api.core.db.entities import FlowSession
+        from nexolu_comms_api.core.db.session import get_sessionmaker
+
+        async with get_sessionmaker()() as session:
+            query = update(FlowSession).values(resume_at=datetime.utcnow() - timedelta(minutes=1))
+            if session_id:
+                query = query.where(FlowSession.id == session_id)
+            await session.execute(query)
+            await session.commit()
+        return await resume_due_sessions()
+
+    return asyncio.run(inner())
+
+
+def _session_statuses() -> list[str]:
+    async def inner() -> list[str]:
+        from sqlalchemy import select
+
+        from nexolu_comms_api.core.db.entities import FlowSession
+        from nexolu_comms_api.core.db.session import get_sessionmaker
+
+        async with get_sessionmaker()() as session:
+            rows = await session.execute(
+                select(FlowSession.status).order_by(FlowSession.started_at)
+            )
+            return [row[0] for row in rows]
+
+    return asyncio.run(inner())
+
+
+def test_delay_waits_and_the_worker_resumes(client, platform_headers, auth_headers, httpx_mock):
+    _create_flow(client, platform_headers, name="recordatorio", definition=DELAY_FLOW)
+
+    httpx_mock.add_response(url=MESSAGES_URL, json={"messages": [{"id": "wamid.1"}]})
+    response = _trigger(client, auth_headers, flow="recordatorio")
+    assert response.json()["status"] == "waiting"
+    # Solo salio la confirmacion; el recordatorio espera su hora.
+    assert len(httpx_mock.get_requests(url=MESSAGES_URL)) == 1
+
+    # Antes de vencerse, el worker no toca nada.
+    assert asyncio.run(resume_due_sessions()) == 0
+
+    httpx_mock.add_response(url=MESSAGES_URL, json={"messages": [{"id": "wamid.2"}]})
+    assert _force_resume() == 1
+
+    reminder = json.loads(httpx_mock.get_requests(url=MESSAGES_URL)[1].content)
+    assert reminder["text"]["body"] == "¡Te esperamos mañana, Laura!"
+    assert _session_statuses() == ["completed"]
+
+
+def test_a_new_flow_supersedes_a_waiting_delay(client, platform_headers, auth_headers, httpx_mock):
+    """ManyChat-semantica: el flujo mas reciente gana - un delay pendiente
+    no debe despertar si otro flujo ya tomo la conversacion."""
+    _create_flow(client, platform_headers, name="recordatorio", definition=DELAY_FLOW)
+    _create_flow(client, platform_headers)  # post_agenda (botones)
+
+    httpx_mock.add_response(url=MESSAGES_URL, json={"messages": [{"id": "wamid.1"}]})
+    _trigger(client, auth_headers, flow="recordatorio")
+
+    httpx_mock.add_response(url=MESSAGES_URL, json={"messages": [{"id": "wamid.2"}]})
+    _trigger(client, auth_headers)  # el nuevo flujo reemplaza al delay
+
+    assert _session_statuses() == ["superseded", "active"]
+    # Aunque el delay "venza", el worker no lo toca: ya no esta waiting.
+    assert _force_resume() == 0
+    assert len(httpx_mock.get_requests(url=MESSAGES_URL)) == 2
 
 
 def test_flow_sends_are_audited_as_notifications(client, platform_headers, auth_headers, httpx_mock):
