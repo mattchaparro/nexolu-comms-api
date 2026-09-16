@@ -648,6 +648,61 @@ def test_media_list_and_capture_end_to_end(client, platform_headers, auth_header
     assert final["text"]["body"].startswith("¡Listo, Laura!")
 
 
+# --- nodo template: reabrir la conversacion fuera de la ventana de 24h --------
+
+TEMPLATE_FLOW = {
+    "start": "espera",
+    "nodes": {
+        "espera": {"type": "delay", "minutes": 2880, "next": "seguimiento"},
+        "seguimiento": {
+            "type": "template",
+            "template": "post_visita",
+            "language": "es",
+            "params": ["{{contact.name}}", "{{servicio}}"],
+        },
+    },
+}
+
+
+@pytest.mark.parametrize(
+    ("definition", "expected"),
+    [
+        ({"start": "t", "nodes": {"t": {"type": "template"}}}, "template"),
+        (
+            {"start": "t", "nodes": {"t": {"type": "template", "template": "x", "params": [1]}}},
+            "params",
+        ),
+    ],
+)
+def test_validate_rejects_broken_template_nodes(definition, expected):
+    with pytest.raises(FlowDefinitionError, match=expected):
+        validate_definition(definition)
+
+
+def test_template_node_sends_the_approved_template_with_params(
+    client, platform_headers, auth_headers, httpx_mock
+):
+    """El caso real: delay de 2 dias -> la ventana de 24h murio -> el
+    seguimiento sale como plantilla aprobada, con las variables del flujo."""
+    _create_flow(client, platform_headers, name="post_visita_48h", definition=TEMPLATE_FLOW)
+
+    response = _trigger(
+        client, auth_headers, flow="post_visita_48h", variables={"servicio": "Semi"}
+    )
+    assert response.json()["status"] == "waiting"  # el delay quedo armado
+
+    # Vence el delay: el worker retoma y envia la PLANTILLA.
+    httpx_mock.add_response(url=MESSAGES_URL, json={"messages": [{"id": "wamid.tpl"}]})
+    assert _force_resume() == 1
+
+    sent = json.loads(httpx_mock.get_requests(url=MESSAGES_URL)[0].content)
+    assert sent["type"] == "template"
+    assert sent["template"]["name"] == "post_visita"
+    assert sent["template"]["language"] == {"code": "es"}
+    params = sent["template"]["components"][0]["parameters"]
+    assert [p["text"] for p in params] == ["Laura", "Semi"]
+
+
 def test_flow_sends_are_audited_as_notifications(client, platform_headers, auth_headers, httpx_mock):
     _create_flow(client, platform_headers)
     httpx_mock.add_response(url=MESSAGES_URL, json={"messages": [{"id": "wamid.menu"}]})

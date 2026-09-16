@@ -58,6 +58,11 @@ ManyChat):
              texto libre del contacto queda en contact.fields[field]
              (la "Recopilacion de datos" de ManyChat). Un mensaje sin
              texto no cuenta; sigue esperando.
+  `template` {"template": <nombre aprobado>, "language"?: "es",
+             "params"?: [texto por {{1}}, {{2}}...], "next"?} - envia una
+             plantilla aprobada de Meta. Es la UNICA pieza que entrega
+             fuera de la ventana de 24h: el seguimiento correcto despues
+             de un `delay` largo. Se cobra como utility.
 
 La clave raiz `ui` (posiciones del builder visual del panel) se guarda con
 la definicion y el motor la ignora por completo.
@@ -117,6 +122,7 @@ VALID_NODE_TYPES = (
     "media",
     "list",
     "capture",
+    "template",
 )
 
 # Nodos que envian un mensaje CON texto obligatorio ('media' tambien envia,
@@ -218,6 +224,19 @@ def validate_definition(definition: dict[str, Any]) -> None:
             raise FlowDefinitionError(
                 f"El nodo '{node_id}' (capture) necesita 'field': el custom field donde guardar la respuesta."
             )
+
+        if node_type == "template":
+            if not node.get("template"):
+                raise FlowDefinitionError(
+                    f"El nodo '{node_id}' (template) necesita 'template': el nombre de la plantilla aprobada."
+                )
+            params = node.get("params")
+            if params is not None and not (
+                isinstance(params, list) and all(isinstance(p, str) for p in params)
+            ):
+                raise FlowDefinitionError(
+                    f"Los 'params' de '{node_id}' deben ser una lista de textos (uno por {{{{1}}}}, {{{{2}}}}...)."
+                )
 
         if node_type == "random":
             branches = node.get("branches")
@@ -447,12 +466,25 @@ class FlowRunner:
     async def _send_node(self, node: dict[str, Any], context: dict[str, Any]) -> None:
         node_type = node["type"]
         text = interpolate(str(node.get("text", "")), context)
+        template_params = [interpolate(str(p), context) for p in node.get("params", [])]
         message = OutboundMessage(
             to=self._contact.phone,
             text=text,
             # Respuestas dentro de la conversacion: categoria service (Meta
-            # no la cobra dentro de la ventana de 24h).
-            category="service",
+            # no la cobra dentro de la ventana de 24h). La excepcion es el
+            # nodo template: existe justo para REABRIR la conversacion (p.ej.
+            # despues de un delay largo) y se cobra como utility.
+            category="utility" if node_type == "template" else "service",
+            template_name=str(node["template"]) if node_type == "template" else None,
+            template_language=str(node.get("language", "es")) if node_type == "template" else None,
+            template_components=[
+                {
+                    "type": "body",
+                    "parameters": [{"type": "text", "text": p} for p in template_params],
+                }
+            ]
+            if node_type == "template" and template_params
+            else [],
             buttons=[
                 {"id": str(b["id"]), "title": interpolate(str(b["title"]), context)}
                 for b in node.get("buttons", [])
