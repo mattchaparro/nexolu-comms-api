@@ -63,6 +63,12 @@ ManyChat):
              plantilla aprobada de Meta. Es la UNICA pieza que entrega
              fuera de la ventana de 24h: el seguimiento correcto despues
              de un `delay` largo. Se cobra como utility.
+  `product` {"retailer_id": <b{negocio}-{sku}>, "text"?, "next"?} - UN
+             producto del catalogo (SPM); o {"header"?, "sections":
+             [{"title", "retailer_ids": [...]}]} - varios (MPM, max 10
+             secciones / 30 productos). El catalog_id sale de la
+             identidad efectiva (app o canal del negocio); el pedido que
+             la clienta arme vuelve por el webhook `order` de siempre.
 
 La clave raiz `ui` (posiciones del builder visual del panel) se guarda con
 la definicion y el motor la ignora por completo.
@@ -123,7 +129,12 @@ VALID_NODE_TYPES = (
     "list",
     "capture",
     "template",
+    "product",
 )
+
+# Reglas de Meta para el MPM (multi-product message).
+MAX_PRODUCT_SECTIONS = 10
+MAX_PRODUCTS_TOTAL = 30
 
 # Nodos que envian un mensaje CON texto obligatorio ('media' tambien envia,
 # pero su contenido es el archivo y el caption es opcional).
@@ -224,6 +235,33 @@ def validate_definition(definition: dict[str, Any]) -> None:
             raise FlowDefinitionError(
                 f"El nodo '{node_id}' (capture) necesita 'field': el custom field donde guardar la respuesta."
             )
+
+        if node_type == "product":
+            sections = node.get("sections")
+            if not node.get("retailer_id") and not sections:
+                raise FlowDefinitionError(
+                    f"El nodo '{node_id}' (product) necesita 'retailer_id' (un producto) "
+                    "o 'sections' (varios)."
+                )
+            if sections is not None:
+                if not isinstance(sections, list) or not (
+                    1 <= len(sections) <= MAX_PRODUCT_SECTIONS
+                ):
+                    raise FlowDefinitionError(
+                        f"Las 'sections' de '{node_id}' van de 1 a {MAX_PRODUCT_SECTIONS} (regla de Meta)."
+                    )
+                total = 0
+                for section in sections:
+                    ids = section.get("retailer_ids") if isinstance(section, dict) else None
+                    if not (isinstance(section, dict) and section.get("title") and isinstance(ids, list) and ids):
+                        raise FlowDefinitionError(
+                            f"Cada seccion de '{node_id}' necesita 'title' y 'retailer_ids' no vacios."
+                        )
+                    total += len(ids)
+                if total > MAX_PRODUCTS_TOTAL:
+                    raise FlowDefinitionError(
+                        f"'{node_id}' lista {total} productos; Meta permite maximo {MAX_PRODUCTS_TOTAL}."
+                    )
 
         if node_type == "template":
             if not node.get("template"):
@@ -514,6 +552,21 @@ class FlowRunner:
             ]
             if node_type == "list"
             else [],
+            # Producto(s) del catalogo: un retailer_id = SPM; sections = MPM.
+            # El catalog_id lo pone el canal desde la identidad efectiva.
+            product_retailer_id=(
+                str(node["retailer_id"]) if node_type == "product" and node.get("retailer_id") else None
+            ),
+            product_sections=[
+                {
+                    "title": str(s["title"]),
+                    "product_retailer_ids": [str(r) for r in s["retailer_ids"]],
+                }
+                for s in node.get("sections", [])
+            ]
+            if node_type == "product" and node.get("sections")
+            else [],
+            product_header=str(node.get("header", "")) or None if node_type == "product" else None,
         )
 
         identity, _ = await resolve_whatsapp_identity(

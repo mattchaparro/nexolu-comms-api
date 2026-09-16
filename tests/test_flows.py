@@ -703,6 +703,124 @@ def test_template_node_sends_the_approved_template_with_params(
     assert [p["text"] for p in params] == ["Laura", "Semi"]
 
 
+# --- nodo product: el catalogo dentro del flujo -------------------------------
+
+
+def _setup_tienda(client, platform_headers) -> dict[str, str]:
+    """App con WABA + catalogo configurados (mismo arreglo de test_catalog)."""
+    created = client.post("/v1/admin/apps", headers=platform_headers, json={"app_id": "tienda"})
+    api_key = created.json()["api_key"]
+    client.post(
+        "/v1/admin/apps/tienda/providers/meta-whatsapp",
+        headers=platform_headers,
+        json={
+            "phone_number_id": "777000",
+            "access_token": "tienda-token",
+            "waba_id": "waba-tienda",
+            "catalog_id": "cat-99",
+            "meta_business_id": "biz-500",
+        },
+    )
+    return {"Authorization": f"Bearer {api_key}"}
+
+
+TIENDA_MESSAGES_URL = "https://graph.facebook.com/v21.0/777000/messages"
+
+PRODUCT_FLOW = {
+    "start": "oferta",
+    "nodes": {
+        "oferta": {
+            "type": "product",
+            "text": "Mira lo que te tenemos hoy:",
+            "retailer_id": "b3-semi-clasico",
+        },
+    },
+}
+
+MPM_FLOW = {
+    "start": "menu",
+    "nodes": {
+        "menu": {
+            "type": "product",
+            "text": "Nuestros servicios estrella:",
+            "header": "Catálogo Luxury",
+            "sections": [
+                {"title": "Manos", "retailer_ids": ["b3-semi", "b3-tradicional"]},
+                {"title": "Pies", "retailer_ids": ["b3-pedicure"]},
+            ],
+        },
+    },
+}
+
+
+@pytest.mark.parametrize(
+    ("definition", "expected"),
+    [
+        ({"start": "p", "nodes": {"p": {"type": "product"}}}, "retailer_id"),
+        (
+            {"start": "p", "nodes": {"p": {"type": "product", "sections": [{"title": "x"}]}}},
+            "retailer_ids",
+        ),
+        (
+            {
+                "start": "p",
+                "nodes": {
+                    "p": {
+                        "type": "product",
+                        "sections": [{"title": "x", "retailer_ids": [f"r{i}" for i in range(31)]}],
+                    }
+                },
+            },
+            "maximo 30",
+        ),
+    ],
+)
+def test_validate_rejects_broken_product_nodes(definition, expected):
+    with pytest.raises(FlowDefinitionError, match=expected):
+        validate_definition(definition)
+
+
+def test_product_node_sends_spm_and_mpm(client, platform_headers, httpx_mock):
+    tienda_headers = _setup_tienda(client, platform_headers)
+    client.post(
+        "/v1/admin/flows",
+        headers=platform_headers,
+        json={"app_id": "tienda", "name": "oferta_dia", "trigger_type": "api", "definition": PRODUCT_FLOW},
+    )
+    client.post(
+        "/v1/admin/flows",
+        headers=platform_headers,
+        json={"app_id": "tienda", "name": "menu_servicios", "trigger_type": "api", "definition": MPM_FLOW},
+    )
+
+    # SPM: un producto, con el catalog_id de la identidad de la app.
+    httpx_mock.add_response(url=TIENDA_MESSAGES_URL, json={"messages": [{"id": "wamid.spm"}]})
+    response = client.post(
+        "/v1/flows/trigger",
+        headers=tienda_headers,
+        json={"flow": "oferta_dia", "to": "573001112233"},
+    )
+    assert response.json()["status"] == "completed"
+    spm = json.loads(httpx_mock.get_requests(url=TIENDA_MESSAGES_URL)[0].content)
+    assert spm["interactive"]["type"] == "product"
+    assert spm["interactive"]["action"] == {
+        "catalog_id": "cat-99",
+        "product_retailer_id": "b3-semi-clasico",
+    }
+
+    # MPM: secciones con header, mismo catalogo.
+    httpx_mock.add_response(url=TIENDA_MESSAGES_URL, json={"messages": [{"id": "wamid.mpm"}]})
+    client.post(
+        "/v1/flows/trigger",
+        headers=tienda_headers,
+        json={"flow": "menu_servicios", "to": "573001112233"},
+    )
+    mpm = json.loads(httpx_mock.get_requests(url=TIENDA_MESSAGES_URL)[1].content)
+    assert mpm["interactive"]["type"] == "product_list"
+    assert mpm["interactive"]["action"]["catalog_id"] == "cat-99"
+    assert [s["title"] for s in mpm["interactive"]["action"]["sections"]] == ["Manos", "Pies"]
+
+
 def test_flow_sends_are_audited_as_notifications(client, platform_headers, auth_headers, httpx_mock):
     _create_flow(client, platform_headers)
     httpx_mock.add_response(url=MESSAGES_URL, json={"messages": [{"id": "wamid.menu"}]})
