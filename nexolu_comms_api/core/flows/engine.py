@@ -63,6 +63,18 @@ ManyChat):
              plantilla aprobada de Meta. Es la UNICA pieza que entrega
              fuera de la ventana de 24h: el seguimiento correcto despues
              de un `delay` largo. Se cobra como utility.
+  `blocks`  el paso "Enviar mensaje" de ManyChat: {"blocks": [...],
+             "next"?} - una PILA de 1-10 bloques enviados seguidos, cada
+             uno su propio mensaje de WhatsApp:
+               {"type":"text","text",...,"buttons"?: [max 3 c/u]}
+               {"type":"cta","text","url","button"?}
+               {"type":"image|video|audio|document","url","caption"?,"filename"?}
+               {"type":"wait","seconds":1-15}  (pausa corta entre textos)
+               {"type":"capture","text","field","next"?}  (ULTIMO; sin botones en el nodo)
+               {"type":"list","text","button"?,"rows":[...]}  (ULTIMO)
+             Ids de opcion unicos por nodo. Si algun bloque tiene botones
+             o el ultimo es list/capture, el nodo ESPERA; si no, sigue
+             por `next`.
   `product` {"retailer_id": <b{negocio}-{sku}>, "text"?, "next"?} - UN
              producto del catalogo (SPM); o {"header"?, "sections":
              [{"title", "retailer_ids": [...]}]} - varios (MPM, max 10
@@ -130,7 +142,15 @@ VALID_NODE_TYPES = (
     "capture",
     "template",
     "product",
+    "blocks",
 )
+
+# El paso "Enviar mensaje" de ManyChat: UN nodo `blocks` = una PILA de
+# bloques de contenido que se envian seguidos (texto+botones, multimedia,
+# retraso corto, cta, y al final una lista o una captura que esperan).
+BLOCK_TYPES = ("text", "cta", "image", "video", "audio", "document", "wait", "capture", "list")
+MAX_BLOCKS_PER_NODE = 10
+MAX_BLOCK_WAIT_SECONDS = 15  # retraso CORTO entre textos; lo largo es el nodo delay
 
 # Reglas de Meta para el MPM (multi-product message).
 MAX_PRODUCT_SECTIONS = 10
@@ -236,6 +256,9 @@ def validate_definition(definition: dict[str, Any]) -> None:
                 f"El nodo '{node_id}' (capture) necesita 'field': el custom field donde guardar la respuesta."
             )
 
+        if node_type == "blocks":
+            _validate_blocks(node_id, node, nodes)
+
         if node_type == "product":
             sections = node.get("sections")
             if not node.get("retailer_id") and not sections:
@@ -294,6 +317,122 @@ def validate_definition(definition: dict[str, Any]) -> None:
                     raise FlowDefinitionError(
                         f"La rama {index} de '{node_id}' apunta a nodo inexistente: {branch['next']!r}."
                     )
+
+
+def _validate_blocks(node_id: str, node: dict[str, Any], nodes: dict[str, Any]) -> None:
+    blocks = node.get("blocks")
+    if not isinstance(blocks, list) or not (1 <= len(blocks) <= MAX_BLOCKS_PER_NODE):
+        raise FlowDefinitionError(
+            f"El nodo '{node_id}' (blocks) necesita entre 1 y {MAX_BLOCKS_PER_NODE} 'blocks'."
+        )
+
+    seen_option_ids: set[str] = set()
+    has_buttons = False
+    for index, block in enumerate(blocks):
+        if not isinstance(block, dict) or block.get("type") not in BLOCK_TYPES:
+            raise FlowDefinitionError(
+                f"El bloque {index} de '{node_id}' necesita type en: {', '.join(BLOCK_TYPES)}."
+            )
+        block_type = block["type"]
+        is_last = index == len(blocks) - 1
+
+        if block_type in ("text", "cta", "list", "capture") and not block.get("text"):
+            raise FlowDefinitionError(f"El bloque {index} ({block_type}) de '{node_id}' necesita 'text'.")
+        if block_type == "cta" and not block.get("url"):
+            raise FlowDefinitionError(f"El bloque {index} (cta) de '{node_id}' necesita 'url'.")
+        if block_type in ("image", "video", "audio", "document") and not block.get("url"):
+            raise FlowDefinitionError(f"El bloque {index} ({block_type}) de '{node_id}' necesita 'url'.")
+
+        if block_type == "wait":
+            seconds = block.get("seconds")
+            if not isinstance(seconds, int) or not (1 <= seconds <= MAX_BLOCK_WAIT_SECONDS):
+                raise FlowDefinitionError(
+                    f"El bloque {index} (wait) de '{node_id}' necesita 'seconds' entre 1 y "
+                    f"{MAX_BLOCK_WAIT_SECONDS} (para pausas largas esta el nodo delay)."
+                )
+
+        if block_type == "text":
+            buttons = block.get("buttons") or []
+            if not isinstance(buttons, list) or len(buttons) > 3:
+                raise FlowDefinitionError(
+                    f"El bloque {index} de '{node_id}' admite maximo 3 'buttons' (regla de Meta)."
+                )
+            has_buttons = has_buttons or bool(buttons)
+            for button in buttons:
+                if not (isinstance(button, dict) and button.get("id") and button.get("title")):
+                    raise FlowDefinitionError(f"Un boton del bloque {index} de '{node_id}' necesita 'id' y 'title'.")
+                if button["id"] in seen_option_ids:
+                    raise FlowDefinitionError(
+                        f"El id de opcion '{button['id']}' se repite dentro de '{node_id}'."
+                    )
+                seen_option_ids.add(button["id"])
+                if button.get("next") is not None and button["next"] not in nodes:
+                    raise FlowDefinitionError(
+                        f"El boton '{button['id']}' de '{node_id}' apunta a nodo inexistente."
+                    )
+
+        if block_type == "list":
+            if not is_last:
+                raise FlowDefinitionError(
+                    f"El bloque list de '{node_id}' debe ser el ULTIMO: la lista espera la eleccion."
+                )
+            rows = block.get("rows")
+            if not isinstance(rows, list) or not (1 <= len(rows) <= MAX_LIST_ROWS):
+                raise FlowDefinitionError(
+                    f"El bloque list de '{node_id}' necesita entre 1 y {MAX_LIST_ROWS} 'rows'."
+                )
+            for row in rows:
+                if not (isinstance(row, dict) and row.get("id") and row.get("title")):
+                    raise FlowDefinitionError(f"Una fila de la lista de '{node_id}' necesita 'id' y 'title'.")
+                if row["id"] in seen_option_ids:
+                    raise FlowDefinitionError(
+                        f"El id de opcion '{row['id']}' se repite dentro de '{node_id}'."
+                    )
+                seen_option_ids.add(row["id"])
+                if row.get("next") is not None and row["next"] not in nodes:
+                    raise FlowDefinitionError(f"La fila '{row['id']}' de '{node_id}' apunta a nodo inexistente.")
+
+        if block_type == "capture":
+            if not is_last:
+                raise FlowDefinitionError(
+                    f"El bloque capture de '{node_id}' debe ser el ULTIMO: espera la respuesta."
+                )
+            if not block.get("field"):
+                raise FlowDefinitionError(f"El bloque capture de '{node_id}' necesita 'field'.")
+            if has_buttons:
+                raise FlowDefinitionError(
+                    f"'{node_id}' mezcla botones con captura de texto: la respuesta seria ambigua. "
+                    "Separa la captura en su propio paso."
+                )
+
+
+def _node_choice_options(node: dict[str, Any]) -> list[dict[str, Any]]:
+    """Las opciones que un nodo en espera acepta como respuesta: botones y
+    filas de lista, tanto del nodo plano como de todos sus bloques."""
+    options = [*node.get("buttons", []), *node.get("rows", [])]
+    for block in node.get("blocks", []):
+        options.extend(block.get("buttons", []))
+        options.extend(block.get("rows", []))
+    return options
+
+
+def _node_capture_field(node: dict[str, Any]) -> str | None:
+    """El custom field si este nodo espera TEXTO libre (capture plano o
+    bloque capture al final de un nodo blocks)."""
+    if node.get("type") == "capture":
+        return str(node.get("field"))
+    blocks = node.get("blocks") or []
+    if node.get("type") == "blocks" and blocks and blocks[-1].get("type") == "capture":
+        return str(blocks[-1].get("field"))
+    return None
+
+
+def _node_waits(node: dict[str, Any]) -> bool:
+    if node.get("type") in WAITING_NODE_TYPES:
+        return True
+    if node.get("type") != "blocks":
+        return False
+    return _node_capture_field(node) is not None or bool(_node_choice_options(node))
 
 
 def _validate_condition(node_id: str, node: dict[str, Any], nodes: dict[str, Any]) -> None:
@@ -478,9 +617,12 @@ class FlowRunner:
                 await self._session.commit()
                 return
 
-            await self._send_node(node, context)
+            if node["type"] == "blocks":
+                await self._send_blocks(node, context)
+            else:
+                await self._send_node(node, context)
 
-            if node["type"] in WAITING_NODE_TYPES:
+            if _node_waits(node):
                 # Parada: la sesion queda esperando la respuesta aqui
                 # (boton, opcion de la lista, o el texto libre de capture).
                 flow_session.current_node = node_id
@@ -568,7 +710,61 @@ class FlowRunner:
             else [],
             product_header=str(node.get("header", "")) or None if node_type == "product" else None,
         )
+        await self._deliver(message)
 
+    async def _send_blocks(self, node: dict[str, Any], context: dict[str, Any]) -> None:
+        """El paso 'Enviar mensaje' de ManyChat: cada bloque de contenido es
+        SU PROPIO mensaje de WhatsApp, enviados seguidos; `wait` es la pausa
+        corta entre textos (el efecto 'esta escribiendo')."""
+        for block in node.get("blocks", []):
+            block_type = block.get("type")
+            text = interpolate(str(block.get("text", "")), context)
+
+            if block_type == "wait":
+                await asyncio.sleep(min(int(block.get("seconds", 1)), MAX_BLOCK_WAIT_SECONDS))
+                continue
+
+            message = OutboundMessage(
+                to=self._contact.phone,
+                text=text if block_type not in MEDIA_KINDS else None,
+                category="service",
+                buttons=[
+                    {"id": str(b["id"]), "title": interpolate(str(b["title"]), context)}
+                    for b in block.get("buttons", [])
+                ]
+                if block_type == "text"
+                else [],
+                cta_url=interpolate(str(block["url"]), context) if block_type == "cta" else None,
+                cta_title=str(block.get("button", "Abrir")) if block_type == "cta" else None,
+                media_kind=block_type if block_type in MEDIA_KINDS else None,
+                media_url=interpolate(str(block.get("url", "")), context)
+                if block_type in MEDIA_KINDS
+                else None,
+                media_caption=interpolate(str(block.get("caption", "")), context) or None
+                if block_type in MEDIA_KINDS
+                else None,
+                media_filename=str(block.get("filename", "")) or None
+                if block_type == "document"
+                else None,
+                list_button=str(block.get("button", "")) or None if block_type == "list" else None,
+                list_rows=[
+                    {
+                        "id": str(r["id"]),
+                        "title": interpolate(str(r["title"]), context),
+                        **(
+                            {"description": interpolate(str(r["description"]), context)}
+                            if r.get("description")
+                            else {}
+                        ),
+                    }
+                    for r in block.get("rows", [])
+                ]
+                if block_type == "list"
+                else [],
+            )
+            await self._deliver(message)
+
+    async def _deliver(self, message: OutboundMessage) -> None:
         identity, _ = await resolve_whatsapp_identity(
             self._session, self._app, self._contact.business_id or self._app.app_id
         )
@@ -716,15 +912,22 @@ async def _handle_inbound_event(event_id: str) -> None:
                 return
             node = flow.definition.get("nodes", {}).get(active.current_node, {})
 
-            if node.get("type") == "capture":
+            capture_field = _node_capture_field(node)
+            if capture_field:
                 # Recopilacion de datos: CUALQUIER texto es la respuesta y
                 # queda en el custom field del contacto. Un mensaje sin
                 # texto (sticker, audio) no cuenta: se sigue esperando.
                 if not text:
                     await session.commit()
                     return
-                contact.fields = {**contact.fields, str(node.get("field")): text.strip()}
-                await FlowRunner(session, app, flow, contact).run_from(active, node.get("next"))
+                contact.fields = {**contact.fields, capture_field: text.strip()}
+                blocks = node.get("blocks") or []
+                next_id = (
+                    (blocks[-1].get("next") if blocks else None) or node.get("next")
+                    if node.get("type") == "blocks"
+                    else node.get("next")
+                )
+                await FlowRunner(session, app, flow, contact).run_from(active, next_id)
                 return
 
             chosen = _match_choice(node, button_id, text)
@@ -763,9 +966,9 @@ async def _handle_inbound_event(event_id: str) -> None:
 def _match_choice(
     node: dict[str, Any], choice_id: str | None, text: str | None
 ) -> dict[str, Any] | None:
-    """La opcion elegida en un nodo que espera: boton de `buttons` o fila
-    de `list`. Mismo contrato: {id, title, next?}."""
-    for option in [*node.get("buttons", []), *node.get("rows", [])]:
+    """La opcion elegida en un nodo que espera: boton o fila de lista, del
+    nodo plano o de sus bloques. Mismo contrato: {id, title, next?}."""
+    for option in _node_choice_options(node):
         if choice_id and str(option.get("id")) == choice_id:
             return option
         # Tolerancia: el usuario escribio el titulo en vez de tocar la opcion.

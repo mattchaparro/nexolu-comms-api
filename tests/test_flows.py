@@ -821,6 +821,159 @@ def test_product_node_sends_spm_and_mpm(client, platform_headers, httpx_mock):
     assert [s["title"] for s in mpm["interactive"]["action"]["sections"]] == ["Manos", "Pies"]
 
 
+# --- nodo blocks: el paso "Enviar mensaje" de ManyChat ------------------------
+
+# El caso real calcado de "Mis citas" de Luxury: imagen + texto con las
+# variables de la cita + botones, todo en UN paso del canvas.
+BLOCKS_FLOW = {
+    "start": "cita",
+    "nodes": {
+        "cita": {
+            "type": "blocks",
+            "blocks": [
+                {"type": "image", "url": "https://cdn.nexolu.co/logo.png"},
+                {"type": "wait", "seconds": 1},
+                {
+                    "type": "text",
+                    "text": "Hemos encontrado la siguiente cita:\n📅 Día: {{fecha}}\n⏰ Hora: {{hora}}",
+                    "buttons": [
+                        {"id": "reagendar", "title": "Reagendar cita", "next": "reagendada"},
+                        {"id": "cancelar", "title": "Cancelar cita"},
+                    ],
+                },
+            ],
+        },
+        "reagendada": {"type": "message", "text": "Listo, te reagendamos."},
+    },
+}
+
+CAPTURE_BLOCKS_FLOW = {
+    "start": "bienvenida",
+    "nodes": {
+        "bienvenida": {
+            "type": "blocks",
+            "next": "gracias",
+            "blocks": [
+                {"type": "text", "text": "¡Hola! Bienvenida a Luxury 💅"},
+                {"type": "capture", "text": "¿Cuál es tu correo?", "field": "correo"},
+            ],
+        },
+        "gracias": {"type": "message", "text": "Gracias, te escribimos a {{contact.fields.correo}}."},
+    },
+}
+
+
+@pytest.mark.parametrize(
+    ("definition", "expected"),
+    [
+        ({"start": "b", "nodes": {"b": {"type": "blocks"}}}, "blocks"),
+        (
+            {"start": "b", "nodes": {"b": {"type": "blocks", "blocks": [{"type": "nope"}]}}},
+            "type en",
+        ),
+        (
+            {
+                "start": "b",
+                "nodes": {
+                    "b": {
+                        "type": "blocks",
+                        "blocks": [
+                            {"type": "list", "text": "x", "rows": [{"id": "a", "title": "A"}]},
+                            {"type": "text", "text": "y"},
+                        ],
+                    }
+                },
+            },
+            "ULTIMO",
+        ),
+        (
+            {
+                "start": "b",
+                "nodes": {
+                    "b": {
+                        "type": "blocks",
+                        "blocks": [
+                            {"type": "text", "text": "x", "buttons": [{"id": "a", "title": "A"}]},
+                            {"type": "capture", "text": "y", "field": "z"},
+                        ],
+                    }
+                },
+            },
+            "ambigua",
+        ),
+        (
+            {
+                "start": "b",
+                "nodes": {
+                    "b": {
+                        "type": "blocks",
+                        "blocks": [
+                            {"type": "text", "text": "x", "buttons": [{"id": "a", "title": "A"}]},
+                            {"type": "text", "text": "y", "buttons": [{"id": "a", "title": "B"}]},
+                        ],
+                    }
+                },
+            },
+            "se repite",
+        ),
+        (
+            {"start": "b", "nodes": {"b": {"type": "blocks", "blocks": [{"type": "wait", "seconds": 99}]}}},
+            "seconds",
+        ),
+    ],
+)
+def test_validate_rejects_broken_blocks_nodes(definition, expected):
+    with pytest.raises(FlowDefinitionError, match=expected):
+        validate_definition(definition)
+
+
+def test_blocks_node_sends_the_stack_and_waits_on_buttons(
+    client, platform_headers, auth_headers, httpx_mock
+):
+    _create_flow(client, platform_headers, name="mis_citas", definition=BLOCKS_FLOW)
+
+    httpx_mock.add_response(url=MESSAGES_URL, json={"messages": [{"id": "wamid.img"}]})
+    httpx_mock.add_response(url=MESSAGES_URL, json={"messages": [{"id": "wamid.txt"}]})
+    response = _trigger(
+        client, auth_headers, flow="mis_citas", variables={"fecha": "jueves 18", "hora": "3 pm"}
+    )
+    assert response.json()["status"] == "active"  # espera el boton
+
+    sent = [json.loads(r.content) for r in httpx_mock.get_requests(url=MESSAGES_URL)]
+    assert sent[0]["type"] == "image"
+    assert sent[1]["interactive"]["type"] == "button"
+    assert "jueves 18" in sent[1]["interactive"]["body"]["text"]
+    titles = [b["reply"]["title"] for b in sent[1]["interactive"]["action"]["buttons"]]
+    assert titles == ["Reagendar cita", "Cancelar cita"]
+
+    # El boton de un BLOQUE avanza igual que el de un nodo buttons.
+    httpx_mock.add_response(url=MESSAGES_URL, json={"messages": [{"id": "wamid.ok"}]})
+    _inbound(client, httpx_mock, _button_reply("reagendar", "Reagendar cita"))
+    final = json.loads(httpx_mock.get_requests(url=MESSAGES_URL)[2].content)
+    assert final["text"]["body"] == "Listo, te reagendamos."
+
+
+def test_blocks_capture_saves_the_field_and_continues(
+    client, platform_headers, auth_headers, httpx_mock
+):
+    _create_flow(client, platform_headers, name="alta", definition=CAPTURE_BLOCKS_FLOW)
+
+    httpx_mock.add_response(url=MESSAGES_URL, json={"messages": [{"id": "wamid.1"}]})
+    httpx_mock.add_response(url=MESSAGES_URL, json={"messages": [{"id": "wamid.2"}]})
+    response = _trigger(client, auth_headers, flow="alta")
+    assert response.json()["status"] == "active"  # espera el correo
+
+    httpx_mock.add_response(url=MESSAGES_URL, json={"messages": [{"id": "wamid.3"}]})
+    _inbound(client, httpx_mock, _text_message("laura@mail.com"))
+
+    contacts = client.get("/v1/admin/contacts", headers=platform_headers).json()["items"]
+    contact = next(c for c in contacts if c["phone"] == "573001112233")
+    assert contact["fields"]["correo"] == "laura@mail.com"
+
+    final = json.loads(httpx_mock.get_requests(url=MESSAGES_URL)[2].content)
+    assert final["text"]["body"] == "Gracias, te escribimos a laura@mail.com."
+
+
 def test_flow_sends_are_audited_as_notifications(client, platform_headers, auth_headers, httpx_mock):
     _create_flow(client, platform_headers)
     httpx_mock.add_response(url=MESSAGES_URL, json={"messages": [{"id": "wamid.menu"}]})
