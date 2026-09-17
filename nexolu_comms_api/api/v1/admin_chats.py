@@ -26,7 +26,7 @@ from nexolu_comms_api.core.channels.base import OutboundMessage
 from nexolu_comms_api.core.channels.business_channels import resolve_whatsapp_identity
 from nexolu_comms_api.core.channels.registry import get_channel_registry
 from nexolu_comms_api.core.chats import log_outbound_chat
-from nexolu_comms_api.core.db.entities import ChatMessage, Contact
+from nexolu_comms_api.core.db.entities import ChatMessage, Contact, PanelUser
 from nexolu_comms_api.core.db.session import get_session
 from nexolu_comms_api.core.templates.service import TemplateRepository
 from nexolu_comms_api.core.webhooks.app_events import post_app_event
@@ -34,6 +34,12 @@ from nexolu_comms_api.core.webhooks.app_events import post_app_event
 router = APIRouter(prefix="/v1/admin/chats", tags=["admin-chats"])
 
 WINDOW_HOURS = 24
+
+# Tope de hilos que se recorren para armar la bandeja. La busqueda y el
+# contador de no leidos trabajan sobre esta ventana: es la conversacion
+# reciente, que es lo que una bandeja atiende. El historial completo de un
+# contacto se lee en su hilo, no en la lista.
+MAX_CONVERSATIONS_SCANNED = 500
 
 
 class ConversationOut(BaseModel):
@@ -46,6 +52,17 @@ class ConversationOut(BaseModel):
     last_direction: str
     last_at: datetime
     window_open: bool
+    unread: bool
+    assigned_to: str | None = None
+    assigned_name: str | None = None
+
+
+class ConversationListOut(BaseModel):
+    items: list[ConversationOut]
+    # Cuantas quedan sin leer EN TODO el scope, no solo en esta pagina: es
+    # el numero que dice "hay gente esperando".
+    unread_total: int
+    has_more: bool
 
 
 class ChatMessageOut(BaseModel):
@@ -68,26 +85,56 @@ class ChatTemplateIn(BaseModel):
     params: list[str] = Field(default_factory=list, max_length=20)
 
 
+class ChatMediaIn(BaseModel):
+    """Multimedia por link publico (Meta lo descarga; nunca se le suben
+    bytes desde aca). El link sale de POST /v1/admin/media o de cualquier
+    URL publica."""
+
+    kind: str = Field(pattern="^(image|video|audio|document)$")
+    url: str = Field(min_length=1, max_length=2048)
+    caption: str | None = Field(default=None, max_length=1024)
+    filename: str | None = Field(default=None, max_length=191)
+
+
 class ChatSendIn(BaseModel):
-    """O texto libre (dentro de la ventana de 24h) o una plantilla (la unica
-    forma de entregar fuera de ella). Nunca las dos."""
+    """Exactamente una forma: texto libre (solo entrega dentro de la
+    ventana de 24h), plantilla (lo unico que entrega fuera) o multimedia."""
 
     text: str | None = Field(default=None, min_length=1, max_length=4096)
     template: ChatTemplateIn | None = None
+    media: ChatMediaIn | None = None
 
     @model_validator(mode="after")
     def _exactly_one(self) -> ChatSendIn:
-        if (self.text is None) == (self.template is None):
-            raise ValueError("Manda 'text' o 'template', no ambos ni ninguno.")
+        given = [f for f in (self.text, self.template, self.media) if f is not None]
+        if len(given) != 1:
+            raise ValueError("Manda exactamente uno de 'text', 'template' o 'media'.")
         return self
 
 
-@router.get("", response_model=list[ConversationOut])
+class AssignIn(BaseModel):
+    """`user_id` None = soltar la conversacion (vuelve a la bolsa comun)."""
+
+    user_id: str | None = None
+
+
+@router.get("", response_model=ConversationListOut)
 async def list_conversations(
     app_id: str | None = None,
+    q: str | None = None,
+    only_unread: bool = False,
+    limit: int = 50,
+    offset: int = 0,
     scope: PanelScope = Depends(get_panel_scope),
     session: AsyncSession = Depends(get_session),
-) -> list[ConversationOut]:
+) -> ConversationListOut:
+    """La lista de la bandeja: una fila por contacto con su ultimo mensaje.
+
+    `q` busca por nombre, telefono o texto del ultimo mensaje (la busqueda
+    de una bandeja real es "la señora que preguntó por acrílicas", no un
+    id). `unread_total` cuenta TODO el scope, no la pagina: es el numero
+    que dice si hay alguien esperando respuesta.
+    """
     # El ultimo mensaje de cada contacto, en una pasada: max(created_at)
     # por contacto y luego las filas de esos maximos.
     last = (
@@ -104,13 +151,22 @@ async def list_conversations(
             .join(last, (ChatMessage.contact_id == last.c.contact_id) & (ChatMessage.created_at == last.c.last_at))
             .join(Contact, Contact.id == ChatMessage.contact_id)
             .order_by(ChatMessage.created_at.desc())
-            .limit(200)
+            .limit(MAX_CONVERSATIONS_SCANNED)
         )
     ).all()
 
+    # Quien atiende cada hilo, en una sola consulta (evita N+1 al pintar).
+    names = {
+        row.id: (row.full_name or row.email)
+        for row in (await session.execute(select(PanelUser))).scalars()
+    }
+
     threshold = datetime.utcnow() - timedelta(hours=WINDOW_HOURS)
-    out: list[ConversationOut] = []
+    needle = (q or "").strip().lower()
+    matched: list[ConversationOut] = []
+    unread_total = 0
     seen: set[str] = set()
+
     for message, contact in rows:
         if not scope.allows(contact.app_id):
             continue
@@ -119,7 +175,25 @@ async def list_conversations(
         if contact.id in seen:  # empate exacto de created_at
             continue
         seen.add(contact.id)
-        out.append(
+
+        # No leido = entro algo despues de la ultima vez que alguien abrio
+        # el hilo. Lo que sale del panel no cuenta: responder ES leer.
+        unread = message.direction == "in" and (
+            contact.last_read_at is None or contact.last_read_at < message.created_at
+        )
+        if unread:
+            unread_total += 1
+
+        if needle and not (
+            needle in contact.name.lower()
+            or needle in contact.phone.lower()
+            or needle in message.body.lower()
+        ):
+            continue
+        if only_unread and not unread:
+            continue
+
+        matched.append(
             ConversationOut(
                 contact_id=contact.id,
                 app_id=contact.app_id,
@@ -130,9 +204,78 @@ async def list_conversations(
                 last_direction=message.direction,
                 last_at=message.created_at,
                 window_open=bool(contact.last_inbound_at and contact.last_inbound_at > threshold),
+                unread=unread,
+                assigned_to=contact.assigned_to,
+                assigned_name=names.get(contact.assigned_to or ""),
             )
         )
-    return out
+
+    page = matched[offset : offset + min(limit, 200)]
+    return ConversationListOut(
+        items=page,
+        unread_total=unread_total,
+        has_more=len(matched) > offset + len(page),
+    )
+
+
+@router.post("/{contact_id}/read", status_code=status.HTTP_204_NO_CONTENT)
+async def mark_read(
+    contact_id: str,
+    scope: PanelScope = Depends(get_panel_scope),
+    session: AsyncSession = Depends(get_session),
+) -> None:
+    """Marca el hilo como leido hasta ahora. Lo llama el panel al abrirlo."""
+    contact = await _contact_in_scope(session, contact_id, scope)
+    contact.last_read_at = datetime.utcnow()
+    await session.commit()
+
+
+@router.post("/{contact_id}/assign", response_model=ConversationOut)
+async def assign(
+    contact_id: str,
+    payload: AssignIn,
+    scope: PanelScope = Depends(get_panel_scope),
+    session: AsyncSession = Depends(get_session),
+) -> ConversationOut:
+    """Quien se hace cargo del hilo. No bloquea a nadie (un candado en una
+    bandeja chica estorba mas de lo que ayuda): es una señal para que dos
+    personas no contesten lo mismo."""
+    contact = await _contact_in_scope(session, contact_id, scope)
+
+    assigned_name: str | None = None
+    if payload.user_id is not None:
+        user = await session.get(PanelUser, payload.user_id)
+        if user is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Ese usuario no existe."
+            )
+        assigned_name = user.full_name or user.email
+    contact.assigned_to = payload.user_id
+    await session.commit()
+
+    last = (
+        await session.execute(
+            select(ChatMessage)
+            .where(ChatMessage.contact_id == contact.id)
+            .order_by(ChatMessage.created_at.desc())
+            .limit(1)
+        )
+    ).scalars().first()
+    threshold = datetime.utcnow() - timedelta(hours=WINDOW_HOURS)
+    return ConversationOut(
+        contact_id=contact.id,
+        app_id=contact.app_id,
+        business_id=contact.business_id,
+        phone=contact.phone,
+        name=contact.name,
+        last_body=last.body[:120] if last else "",
+        last_direction=last.direction if last else "in",
+        last_at=last.created_at if last else contact.created_at,
+        window_open=bool(contact.last_inbound_at and contact.last_inbound_at > threshold),
+        unread=False,
+        assigned_to=contact.assigned_to,
+        assigned_name=assigned_name,
+    )
 
 
 async def _contact_in_scope(
@@ -227,6 +370,15 @@ async def send_message(
             if payload.template.params
             else [],
         )
+    elif payload.media is not None:
+        message_out = OutboundMessage(
+            to=contact.phone,
+            category="service",
+            media_kind=payload.media.kind,
+            media_url=payload.media.url,
+            media_caption=payload.media.caption,
+            media_filename=payload.media.filename,
+        )
     else:
         message_out = OutboundMessage(to=contact.phone, text=payload.text, category="service")
 
@@ -236,6 +388,9 @@ async def send_message(
     message = log_outbound_chat(
         session, contact=contact, message=message_out, result=result, origin="panel"
     )
+    # Contestar ES leer: si no, el hilo que acabas de atender sigue
+    # apareciendo en negrita como pendiente.
+    contact.last_read_at = datetime.utcnow()
     if payload.template is not None:
         # El cuerpo real lo tiene Meta; en el hilo se guarda lo que el
         # operador vio al enviar (nombre + variables), que es lo que

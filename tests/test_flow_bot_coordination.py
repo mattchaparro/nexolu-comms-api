@@ -140,7 +140,7 @@ def test_app_triggered_flow_advances_when_the_reply_comes_without_business(
     assert httpx_mock.get_requests(url=CALLBACK_URL)[-1].headers["X-Nexolu-Flow-Handled"] == "1"
 
     # Un solo contacto/conversacion, con todo el hilo.
-    conversations = client.get("/v1/admin/chats", headers=platform_headers).json()
+    conversations = client.get("/v1/admin/chats", headers=platform_headers).json()["items"]
     assert len(conversations) == 1
     thread = client.get(
         f"/v1/admin/chats/{conversations[0]['contact_id']}/messages", headers=platform_headers
@@ -174,7 +174,7 @@ def test_api_sends_land_in_the_same_thread_as_out_api(
     assert sent.status_code == 200, sent.text
     assert sent.json()["results"][0]["status"] == "sent"
 
-    conversations = client.get("/v1/admin/chats", headers=platform_headers).json()
+    conversations = client.get("/v1/admin/chats", headers=platform_headers).json()["items"]
     assert len(conversations) == 1
     thread = client.get(
         f"/v1/admin/chats/{conversations[0]['contact_id']}/messages", headers=platform_headers

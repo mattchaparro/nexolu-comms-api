@@ -323,6 +323,13 @@ class Contact(Base):
     tags: Mapped[list[str]] = mapped_column(JSON, default=list)
     fields: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     last_inbound_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Estado de BANDEJA (no de contacto): hasta cuando alguien leyo este
+    # hilo, y quien lo esta atendiendo. Vive aca y no en chat_messages
+    # porque es por conversacion, no por mensaje - y la conversacion ES el
+    # contacto. Sin "no leido" una clienta se queda sin respuesta y nadie
+    # se entera; sin "quien atiende", dos personas contestan lo mismo.
+    last_read_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    assigned_to: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
