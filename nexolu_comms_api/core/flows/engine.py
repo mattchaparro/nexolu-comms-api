@@ -31,7 +31,13 @@ por `next` cuando vence). Todo nodo puede ademas `add_tags`/`remove_tags`/
 `set_fields` sobre el contacto. `{{...}}` interpola contra el contexto de
 la sesion (variables del trigger + `contact.*`).
 
-`condition.when` acepta exactamente UNA de estas formas:
+`condition` multi-rama (el else-if de ManyChat): en vez de `when`+`then`,
+`"cases": [{"when": {...}, "next": <nodo|null>}, ...]` (1 a 8) - se
+evaluan EN ORDEN y gana el primer caso que matchee; si ninguno, sigue por
+`else`. La forma clasica `when`+`then`/`else` sigue valiendo.
+
+`condition.when` (y el `when` de cada caso) acepta exactamente UNA de
+estas formas:
   {"tag": "vip"} / {"not_tag": "vip"}          - tiene / no tiene el tag
   {"field": "x", "equals": "y"}                - tambien not_equals, contains
   {"field": "x", "exists": true}               - tiene valor no vacio
@@ -172,6 +178,9 @@ MAX_DELAY_MINUTES = 20160  # 14 dias: mas alla, es una campana, no un flujo.
 # Aleatorizador: entre 2 y 5 ramas (regla practica de ManyChat; mas ramas
 # es senal de que el flujo necesita una condicion, no un dado).
 MAX_RANDOM_BRANCHES = 5
+
+# Condicion multi-rama (else-if de ManyChat): tope sano de casos.
+MAX_CONDITION_CASES = 8
 
 _CONDITION_OPS = ("equals", "not_equals", "contains", "exists")
 
@@ -435,11 +444,9 @@ def _node_waits(node: dict[str, Any]) -> bool:
     return _node_capture_field(node) is not None or bool(_node_choice_options(node))
 
 
-def _validate_condition(node_id: str, node: dict[str, Any], nodes: dict[str, Any]) -> None:
-    when = node.get("when")
+def _validate_when(node_id: str, when: Any) -> None:
     if not isinstance(when, dict) or not when:
         raise FlowDefinitionError(f"El nodo '{node_id}' (condition) necesita 'when'.")
-
     has_tag = "tag" in when or "not_tag" in when
     ops = [op for op in _CONDITION_OPS if op in when]
     if has_tag:
@@ -454,6 +461,33 @@ def _validate_condition(node_id: str, node: dict[str, Any], nodes: dict[str, Any
                 f"una de: {', '.join(_CONDITION_OPS)}."
             )
 
+
+def _validate_condition(node_id: str, node: dict[str, Any], nodes: dict[str, Any]) -> None:
+    cases = node.get("cases")
+
+    if cases is not None:
+        # Forma multi-rama (else-if de ManyChat): se evaluan en orden y gana
+        # el primer caso que matchee; si ninguno, sigue por 'else'.
+        if not isinstance(cases, list) or not (1 <= len(cases) <= MAX_CONDITION_CASES):
+            raise FlowDefinitionError(
+                f"Los 'cases' de '{node_id}' van de 1 a {MAX_CONDITION_CASES}."
+            )
+        for index, case in enumerate(cases):
+            if not isinstance(case, dict):
+                raise FlowDefinitionError(f"El caso {index} de '{node_id}' no es un objeto.")
+            _validate_when(node_id, case.get("when"))
+            if case.get("next") is not None and case["next"] not in nodes:
+                raise FlowDefinitionError(
+                    f"El caso {index} de '{node_id}' apunta a nodo inexistente: {case['next']!r}."
+                )
+        if node.get("else") is not None and node["else"] not in nodes:
+            raise FlowDefinitionError(
+                f"La rama 'else' de '{node_id}' apunta a nodo inexistente: {node['else']!r}."
+            )
+        return
+
+    # Forma clasica de una sola condicion: when + then/else.
+    _validate_when(node_id, node.get("when"))
     if not node.get("then") and not node.get("else"):
         raise FlowDefinitionError(
             f"El nodo '{node_id}' (condition) necesita al menos una rama 'then' o 'else'."
@@ -487,11 +521,30 @@ def interpolate(text: str, context: dict[str, Any]) -> str:
     return _PLACEHOLDER.sub(lambda m: resolve_context_value(m.group(1), context), text)
 
 
+def _resolve_condition(node: dict[str, Any], context: dict[str, Any]) -> str | None:
+    """A donde sigue un nodo condition: con `cases` (multi-rama) gana el
+    primer caso que matchee y si ninguno, `else`; con la forma clasica,
+    `then` o `else` segun `when`."""
+    cases = node.get("cases")
+    if cases is not None:
+        for case in cases:
+            if _evaluate_when(case.get("when") or {}, context):
+                return case.get("next")
+        return node.get("else")
+    if _evaluate_when(node.get("when") or {}, context):
+        return node.get("then")
+    return node.get("else")
+
+
 def _evaluate_condition(node: dict[str, Any], context: dict[str, Any]) -> bool:
-    """El `when` de un nodo condition, contra el mismo contexto que la
-    interpolacion. Comparaciones de texto: sin mayusculas ni espacios en
-    los bordes - 'Cali ' y 'cali' son la misma respuesta de un humano."""
-    when = node.get("when") or {}
+    """Compat de tests/llamadas viejas: evalua el `when` clasico del nodo."""
+    return _evaluate_when(node.get("when") or {}, context)
+
+
+def _evaluate_when(when: dict[str, Any], context: dict[str, Any]) -> bool:
+    """UN `when` contra el mismo contexto que la interpolacion.
+    Comparaciones de texto: sin mayusculas ni espacios en los bordes -
+    'Cali ' y 'cali' son la misma respuesta de un humano."""
     tags = [str(t) for t in (context.get("contact") or {}).get("tags") or []]
 
     if "tag" in when:
@@ -593,9 +646,9 @@ class FlowRunner:
 
             if node["type"] == "condition":
                 # No envia nada: solo decide la rama. El contexto se rearma
-                # en la proxima vuelta, ya con los tags/fields del nodo.
+                # con los tags/fields que este nodo acabara de aplicar.
                 context = {**flow_session.context, "contact": _contact_context(self._contact)}
-                node_id = node.get("then") if _evaluate_condition(node, context) else node.get("else")
+                node_id = _resolve_condition(node, context)
                 continue
 
             if node["type"] == "random":

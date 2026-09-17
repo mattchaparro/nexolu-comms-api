@@ -470,6 +470,71 @@ def test_a_new_flow_supersedes_a_waiting_delay(client, platform_headers, auth_he
     assert len(httpx_mock.get_requests(url=MESSAGES_URL)) == 2
 
 
+# --- condicion multi-rama (else-if de ManyChat) -------------------------------
+
+# Enruta por la sede guardada en el custom field: el primer caso que
+# matchee gana; sin match, el else.
+CASES_FLOW = {
+    "start": "sede",
+    "nodes": {
+        "sede": {
+            "type": "condition",
+            "cases": [
+                {"when": {"field": "sede", "equals": "norte"}, "next": "norte"},
+                {"when": {"field": "sede", "equals": "centro"}, "next": "centro"},
+                {"when": {"tag": "vip"}, "next": "vip"},
+            ],
+            "else": "generico",
+        },
+        "norte": {"type": "message", "text": "Sede Norte: Cra 10 #20-30."},
+        "centro": {"type": "message", "text": "Sede Centro: Cll 5 #4-50."},
+        "vip": {"type": "message", "text": "Tu asesora VIP te escribe ya."},
+        "generico": {"type": "message", "text": "¿En cuál sede quieres tu cita?"},
+    },
+}
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected"),
+    [
+        (lambda d: d["nodes"]["sede"].update(cases=[]), "1 a 8"),
+        (lambda d: d["nodes"]["sede"]["cases"][0].update(next="fantasma"), "inexistente"),
+        (lambda d: d["nodes"]["sede"]["cases"][1].pop("when"), "'when'"),
+        (lambda d: d["nodes"]["sede"].update(**{"else": "fantasma"}), "inexistente"),
+    ],
+)
+def test_validate_rejects_broken_condition_cases(mutation, expected):
+    definition = json.loads(json.dumps(CASES_FLOW))
+    mutation(definition)
+    with pytest.raises(FlowDefinitionError, match=expected):
+        validate_definition(definition)
+
+
+def test_condition_cases_first_match_wins_and_else_falls_through(
+    client, platform_headers, auth_headers, httpx_mock
+):
+    _create_flow(client, platform_headers, name="por_sede", definition=CASES_FLOW)
+
+    # Sin campos ni tags: cae al else.
+    httpx_mock.add_response(url=MESSAGES_URL, json={"messages": [{"id": "wamid.1"}]})
+    _trigger(client, auth_headers, flow="por_sede")
+    first = json.loads(httpx_mock.get_requests(url=MESSAGES_URL)[0].content)
+    assert "cuál sede" in first["text"]["body"]
+
+    # Con sede=centro Y tag vip: gana el caso de 'centro' (orden, no el vip).
+    contacts = client.get("/v1/admin/contacts", headers=platform_headers).json()["items"]
+    contact = next(c for c in contacts if c["phone"] == "573001112233")
+    client.patch(
+        f"/v1/admin/contacts/{contact['id']}",
+        headers=platform_headers,
+        json={"tags": ["vip"], "fields": {"sede": "Centro"}},
+    )
+    httpx_mock.add_response(url=MESSAGES_URL, json={"messages": [{"id": "wamid.2"}]})
+    _trigger(client, auth_headers, flow="por_sede")
+    second = json.loads(httpx_mock.get_requests(url=MESSAGES_URL)[1].content)
+    assert second["text"]["body"] == "Sede Centro: Cll 5 #4-50."
+
+
 # --- motor v2: random (aleatorizador A/B) -------------------------------------
 
 RANDOM_FLOW = {

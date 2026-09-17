@@ -46,6 +46,7 @@ def app_env(tmp_path, monkeypatch):
     )
     monkeypatch.setenv("NEXOLU_PLATFORM_API_KEY", TEST_PLATFORM_API_KEY)
     monkeypatch.setenv("BREVO_API_KEY", "platform-brevo-key")
+    monkeypatch.setenv("MEDIA_DIR", str(tmp_path / "media"))
 
     _clear_caches()
     yield

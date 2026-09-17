@@ -192,6 +192,13 @@ class Settings(BaseSettings):
     flow_resume_worker_enabled: bool = True
     flow_resume_interval_seconds: int = 30
 
+    # Multimedia subida desde el panel (bloque Imagen del builder): se
+    # guarda plana en MEDIA_DIR y se sirve publica en /media/<nombre> -
+    # Meta descarga por URL. MEDIA_BASE_URL en prod = https://comms.nexolu.co
+    # (vacio = se arma con la URL de la request).
+    media_dir: str = "./media"
+    media_base_url: str = ""
+
     # Registro de apps cliente, como JSON crudo (parseado en `apps`).
     nexolu_apps_json: str = "{}"
 

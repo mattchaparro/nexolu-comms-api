@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager, suppress
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from nexolu_comms_api.api import panel, webhooks
 from nexolu_comms_api.api.v1 import (
@@ -13,6 +15,7 @@ from nexolu_comms_api.api.v1 import (
     admin_catalog,
     admin_channels,
     admin_flows,
+    admin_media,
     admin_providers,
     admin_templates,
     admin_users,
@@ -97,8 +100,15 @@ def create_app() -> FastAPI:
     app.include_router(admin_templates.router)
     app.include_router(admin_flows.router)
     app.include_router(admin_catalog.router)
+    app.include_router(admin_media.router)
     app.include_router(flows.router)
     app.include_router(catalog.router)
+
+    # La multimedia subida desde el panel, servida publica: Meta descarga
+    # las imagenes de los flujos desde aca (ver api/v1/admin_media.py).
+    media_dir = Path(settings.media_dir)
+    media_dir.mkdir(parents=True, exist_ok=True)
+    app.mount("/media", StaticFiles(directory=str(media_dir)), name="media")
 
     return app
 
