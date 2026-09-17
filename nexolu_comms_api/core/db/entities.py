@@ -134,6 +134,11 @@ class WebhookEvent(Base):
     # None = no se pudo verificar (la app no tiene meta_app_secret
     # configurado); True/False = verificada con el secret.
     signature_valid: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # Solo para event_type=message: True/False = el motor de flujos SI/NO
+    # atendio este mensaje (avanzo una sesion o arranco un flujo). Viaja a
+    # la app duena como X-Nexolu-Flow-Handled para que su bot calle cuando
+    # un flujo ya respondio. None = el motor no alcanzo a pronunciarse.
+    flow_handled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     # pending: persistido, aun sin intento | delivered: la app respondio 2xx
     # failed: fallo, hay reintento programado (next_retry_at)
     # dead: se agotaron los reintentos | skipped: app sin callback_url

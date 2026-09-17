@@ -145,6 +145,7 @@ from nexolu_comms_api.core.auth.apps import AppIdentity, resolve_by_app_id
 from nexolu_comms_api.core.channels.base import OutboundMessage
 from nexolu_comms_api.core.channels.business_channels import resolve_whatsapp_identity
 from nexolu_comms_api.core.channels.registry import get_channel_registry
+from nexolu_comms_api.core.chats import log_outbound_chat
 from nexolu_comms_api.core.db.entities import ChatMessage, Contact, Flow, FlowSession, WebhookEvent
 from nexolu_comms_api.core.db.repository import NotificationRepository
 from nexolu_comms_api.core.db.session import get_sessionmaker
@@ -1144,19 +1145,8 @@ class FlowRunner:
 
         # La bandeja tambien registra lo que el motor envia: la conversacion
         # completa (humano + bot) se lee en un solo hilo.
-        self._session.add(
-            ChatMessage(
-                app_id=self._app.app_id,
-                business_id=self._contact.business_id,
-                contact_id=self._contact.id,
-                direction="out",
-                message_type=_outbound_chat_type(message),
-                body=message.text or message.media_caption or "",
-                payload=_outbound_chat_payload(message),
-                wamid=result.provider_message_id,
-                status=result.status,
-                origin="flow",
-            )
+        log_outbound_chat(
+            self._session, contact=self._contact, message=message, result=result, origin="flow"
         )
 
 
@@ -1217,6 +1207,9 @@ async def start_flow(
     variables: dict[str, Any] | None = None,
     contact_name: str = "",
 ) -> FlowSession:
+    # Meta y el webhook manejan el telefono sin '+'; una app que dispare
+    # con '+57...' debe caer en el MISMO contacto (y el mismo hilo).
+    phone = phone.lstrip("+")
     contact = await ContactRepository(session).get_or_create(
         app.app_id, business_id or flow.business_id or "", phone, name=contact_name
     )
@@ -1282,9 +1275,37 @@ async def _handle_inbound_event(event_id: str) -> None:
             if channel is not None:
                 business_id = channel.business_id
 
-        contact = await ContactRepository(session).get_or_create(
-            app.app_id, business_id, phone, name=profile_name
-        )
+        # A partir de aca el motor se pronuncia sobre este mensaje: por
+        # defecto NO lo atendio - la app duena lo sabra por el header
+        # X-Nexolu-Flow-Handled del reenvio y su bot puede contestar.
+        event.flow_handled = False
+
+        # El webhook del numero compartido no sabe el negocio (business_id
+        # ""), pero un flujo disparado por la app pudo crear este contacto
+        # CON negocio. Si el telefono tiene una sesion viva, ESA es la
+        # conversacion: buscar por (app, telefono) evita partir el hilo en
+        # dos contactos y dejar botones que nunca avanzan.
+        contact = (
+            await session.execute(
+                select(Contact)
+                .join(FlowSession, FlowSession.contact_id == Contact.id)
+                .where(
+                    Contact.app_id == app.app_id,
+                    Contact.phone == phone,
+                    FlowSession.status.in_(["active", "waiting"]),
+                )
+                .order_by(FlowSession.updated_at.desc())
+            )
+        ).scalars().first()
+        if contact is None:
+            contact = await ContactRepository(session).get_or_create(
+                app.app_id, business_id, phone, name=profile_name
+            )
+        elif profile_name and not contact.name:
+            contact.name = profile_name
+        # Atribucion: si el contacto ya tiene negocio (lo declaro la app al
+        # disparar un flujo), los keywords se evaluan con ese negocio.
+        business_id = business_id or contact.business_id
         contact.last_inbound_at = datetime.utcnow()
         await session.flush()
 
@@ -1324,6 +1345,7 @@ async def _handle_inbound_event(event_id: str) -> None:
                 if not text:
                     await session.commit()
                     return
+                event.flow_handled = True
                 contact.fields = {**contact.fields, capture_field: text.strip()}
                 blocks = node.get("blocks") or []
                 next_id = (
@@ -1337,9 +1359,11 @@ async def _handle_inbound_event(event_id: str) -> None:
             chosen = _match_choice(node, button_id, text)
             if chosen is None:
                 # Respondio otra cosa: la conversacion es de la app duena,
-                # el motor no insiste. La sesion sigue esperando.
+                # el motor no insiste (flow_handled queda False: el bot de
+                # la app puede ayudar). La sesion sigue esperando.
                 await session.commit()
                 return
+            event.flow_handled = True
             await FlowRunner(session, app, flow, contact).run_from(active, chosen.get("next"))
             return
 
@@ -1360,47 +1384,12 @@ async def _handle_inbound_event(event_id: str) -> None:
         ).scalars()
         for flow in flows:
             if normalized in [str(k).strip().lower() for k in flow.trigger_keywords]:
+                event.flow_handled = True
                 await start_flow(
                     session, app, flow, phone=phone, business_id=business_id, contact_name=profile_name
                 )
                 return
         await session.commit()
-
-
-def _outbound_chat_type(message: OutboundMessage) -> str:
-    if message.media_kind:
-        return message.media_kind
-    if message.template_name:
-        return "template"
-    if message.list_rows:
-        return "list"
-    if message.buttons:
-        return "buttons"
-    if message.cta_url:
-        return "cta_url"
-    if message.product_retailer_id or message.product_sections or message.send_catalog:
-        return "product"
-    return "text"
-
-
-def _outbound_chat_payload(message: OutboundMessage) -> dict[str, Any]:
-    """Lo minimo para pintar la burbuja rica en la bandeja."""
-    payload: dict[str, Any] = {}
-    if message.buttons:
-        payload["buttons"] = message.buttons
-    if message.list_rows:
-        payload["rows"] = message.list_rows
-        payload["list_button"] = message.list_button
-    if message.cta_url:
-        payload["cta_url"] = message.cta_url
-        payload["cta_title"] = message.cta_title
-    if message.media_kind:
-        payload["media_kind"] = message.media_kind
-        payload["media_url"] = message.media_url
-    if message.template_name:
-        payload["template"] = message.template_name
-        payload["language"] = message.template_language
-    return payload
 
 
 def _log_inbound_chat(

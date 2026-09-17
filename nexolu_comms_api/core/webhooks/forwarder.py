@@ -80,6 +80,14 @@ async def attempt_forward(event_id: str, settings: Settings | None = None) -> No
             if channel is not None:
                 extra_headers["X-Nexolu-Business-Id"] = channel.business_id
 
+        # Coordinacion flujos+bot: si el motor de Connect atendio este
+        # mensaje (avanzo una sesion o arranco un flujo), la app lo sabe y
+        # su agente IA se calla - dos respuestas a la misma pregunta es
+        # peor que ninguna. Sin header = el motor no se pronuncio (evento
+        # que no es un mensaje, o motor caido): la app decide sola.
+        if event.flow_handled is not None:
+            extra_headers["X-Nexolu-Flow-Handled"] = "1" if event.flow_handled else "0"
+
         await _forward(session, event, identity, settings, extra_headers)
 
 

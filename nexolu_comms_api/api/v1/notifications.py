@@ -27,6 +27,7 @@ from nexolu_comms_api.core.channels.business_channels import (
 )
 from nexolu_comms_api.core.channels.exceptions import UnknownChannelError
 from nexolu_comms_api.core.channels.registry import get_channel_registry
+from nexolu_comms_api.core.chats import log_outbound_chat, resolve_contact_for_send
 from nexolu_comms_api.core.db.entities import IdempotencyRecord
 from nexolu_comms_api.core.db.repository import NotificationRepository
 from nexolu_comms_api.core.db.session import get_session
@@ -206,6 +207,26 @@ async def send_notification(
             error=result.error,
             cost_micros=result.cost_micros,
         )
+        if channel_name == "whatsapp" and recipient:
+            # La bandeja: lo que la app envia por API (el bot del spa, un
+            # recordatorio) tambien se lee en el hilo del contacto. El
+            # negocio del contacto usa la convencion del motor ("" para el
+            # numero compartido sin negocio declarado), NO el fallback
+            # app_id de las Notifications. Fail-soft: la bandeja jamas
+            # tumba un envio.
+            try:
+                contact = await resolve_contact_for_send(
+                    session, app.app_id, payload.business_id or "", recipient
+                )
+                log_outbound_chat(
+                    session,
+                    contact=contact,
+                    message=_build_message(recipient, payload),
+                    result=result,
+                    origin="api",
+                )
+            except Exception:
+                logger.exception("notifications.chat_log_failed", extra={"app_id": app.app_id})
         results.append(
             ChannelResultOut(
                 channel=channel_name,
@@ -284,11 +305,23 @@ async def _send_one(
     except UnknownChannelError as exc:
         return ChannelSendResult(status=STATUS_FAILED, error=str(exc))
 
+    message = _build_message(recipient, payload)
+
+    try:
+        return await sender.send(app, message)
+    except Exception as exc:
+        logger.exception("notifications.channel_error", extra={"app_id": app.app_id, "channel": channel_name})
+        return ChannelSendResult(status=STATUS_FAILED, error=f"Error inesperado en el canal '{channel_name}': {exc}")
+
+
+def _build_message(recipient: str, payload: SendRequest) -> OutboundMessage:
+    """Un solo lugar arma el OutboundMessage: lo usan el envio y el registro
+    del hilo en la bandeja (la burbuja debe pintar LO QUE se envio)."""
     flow = payload.whatsapp_flow
     product = payload.whatsapp_product
     products = payload.whatsapp_products
     catalog = payload.whatsapp_catalog
-    message = OutboundMessage(
+    return OutboundMessage(
         to=recipient,
         subject=payload.subject,
         text=payload.text,
@@ -312,9 +345,3 @@ async def _send_one(
         send_catalog=catalog is not None,
         catalog_thumbnail_retailer_id=catalog.thumbnail_product_retailer_id if catalog else None,
     )
-
-    try:
-        return await sender.send(app, message)
-    except Exception as exc:
-        logger.exception("notifications.channel_error", extra={"app_id": app.app_id, "channel": channel_name})
-        return ChannelSendResult(status=STATUS_FAILED, error=f"Error inesperado en el canal '{channel_name}': {exc}")
