@@ -1007,6 +1007,43 @@ def test_actions_node_runs_http_request_and_notifies_the_app(
     assert notify[0].headers.get("X-Nexolu-Event") == "flow-notify"
 
 
+def test_notify_app_action_also_emails_the_admins(
+    client, platform_headers, auth_headers, httpx_mock
+):
+    """'Pidio hablar con un humano': ademas del evento al callback, correo
+    directo a los admins/agentes por el canal de email de la app."""
+    definition = {
+        "start": "aviso",
+        "nodes": {
+            "aviso": {
+                "type": "actions",
+                "actions": [
+                    {
+                        "type": "notify_app",
+                        "message": "{{contact.name}} pidió hablar con un humano",
+                        "emails": ["admin@luxurynails.co", "agente@luxurynails.co"],
+                    }
+                ],
+            },
+        },
+    }
+    _create_flow(client, platform_headers, name="pide_humano", definition=definition)
+
+    httpx_mock.add_response(url=CALLBACK_URL, json={"ok": True})
+    httpx_mock.add_response(url="https://api.brevo.com/v3/smtp/email", json={"messageId": "<m1>"})
+    httpx_mock.add_response(url="https://api.brevo.com/v3/smtp/email", json={"messageId": "<m2>"})
+
+    response = _trigger(client, auth_headers, flow="pide_humano")
+    assert response.json()["status"] == "completed"
+
+    emails = httpx_mock.get_requests(url="https://api.brevo.com/v3/smtp/email")
+    assert len(emails) == 2
+    first = json.loads(emails[0].content)
+    assert first["to"][0]["email"] == "admin@luxurynails.co"
+    assert "pidió hablar con un humano" in first["subject"]
+    assert "573001112233" in first["textContent"]
+
+
 def test_start_flow_action_jumps_to_another_flow(
     client, platform_headers, auth_headers, httpx_mock
 ):

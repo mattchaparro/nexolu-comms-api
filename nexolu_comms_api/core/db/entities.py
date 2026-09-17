@@ -322,6 +322,38 @@ class Contact(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class ChatMessage(Base):
+    """UN mensaje de la conversacion con un contacto - la bandeja/live
+    chat de Connect (la de ManyChat). Critica operativamente: el numero
+    del negocio puede no tener app movil ni SIM (Cloud API pura), asi que
+    esta bandeja web es la UNICA forma humana de leer y responder.
+
+    `direction`: in (del contacto, persistido por el webhook antes de
+    cualquier logica de flujos) | out (del negocio o del motor de flujos).
+    `body`: el texto legible (caption si fue multimedia); `message_type` y
+    `payload` guardan el detalle para pintar burbujas ricas. `origin` de
+    los salientes: panel | flow | api."""
+
+    __tablename__ = "chat_messages"
+    __table_args__ = (
+        Index("ix_chat_messages_contact", "contact_id", "created_at"),
+        Index("ix_chat_messages_app", "app_id", "business_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    app_id: Mapped[str] = mapped_column(String(64))
+    business_id: Mapped[str] = mapped_column(String(64), default="")
+    contact_id: Mapped[str] = mapped_column(String(32))
+    direction: Mapped[str] = mapped_column(String(8))  # in | out
+    message_type: Mapped[str] = mapped_column(String(32), default="text")
+    body: Mapped[str] = mapped_column(Text, default="")
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    wamid: Mapped[str | None] = mapped_column(String(191), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="")  # sent|failed|... (solo out)
+    origin: Mapped[str] = mapped_column(String(16), default="")  # panel|flow|api (solo out)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class Flow(Base):
     """Un flujo de automatizacion de conversacion (el concepto central de
     ManyChat, adaptado al guardrail de Connect: el flujo orquesta la

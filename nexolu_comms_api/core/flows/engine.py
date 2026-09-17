@@ -92,9 +92,10 @@ ManyChat):
                  - la "Solicitud externa": pega a la API del negocio y
                    guarda partes de la respuesta en custom fields.
                    Fail-soft: API caida = log, el flujo sigue.
-               {"type":"notify_app","message"} - evento flow_notify
-                 FIRMADO al callback de la app duena (la bandeja de
-                 Connect ES la app).
+               {"type":"notify_app","message","emails"?:[...]} - evento
+                 flow_notify FIRMADO al callback de la app duena, y
+                 correo directo a esos admins/agentes ("pidio un humano"
+                 no puede depender de que alguien mire un panel).
                {"type":"start_flow","flow"} - salta a otro flujo de la
                  app (ULTIMA accion; hereda variables; supersede esta
                  sesion). El goto que evita arboles gigantes.
@@ -144,7 +145,7 @@ from nexolu_comms_api.core.auth.apps import AppIdentity, resolve_by_app_id
 from nexolu_comms_api.core.channels.base import OutboundMessage
 from nexolu_comms_api.core.channels.business_channels import resolve_whatsapp_identity
 from nexolu_comms_api.core.channels.registry import get_channel_registry
-from nexolu_comms_api.core.db.entities import Contact, Flow, FlowSession, WebhookEvent
+from nexolu_comms_api.core.db.entities import ChatMessage, Contact, Flow, FlowSession, WebhookEvent
 from nexolu_comms_api.core.db.repository import NotificationRepository
 from nexolu_comms_api.core.db.session import get_sessionmaker
 from nexolu_comms_api.core.webhooks.signing import build_forward_headers
@@ -410,8 +411,20 @@ def _validate_actions(node_id: str, node: dict[str, Any]) -> None:
                 raise FlowDefinitionError(
                     f"El 'save' de la accion {index} de '{node_id}' es {{campo: ruta.de.respuesta}}."
                 )
-        if action_type == "notify_app" and not action.get("message"):
-            raise FlowDefinitionError(f"La accion {index} de '{node_id}' (notify_app) necesita 'message'.")
+        if action_type == "notify_app":
+            if not action.get("message"):
+                raise FlowDefinitionError(
+                    f"La accion {index} de '{node_id}' (notify_app) necesita 'message'."
+                )
+            emails = action.get("emails")
+            if emails is not None and not (
+                isinstance(emails, list)
+                and emails
+                and all(isinstance(e, str) and "@" in e for e in emails)
+            ):
+                raise FlowDefinitionError(
+                    f"Los 'emails' de la accion {index} de '{node_id}' deben ser correos validos."
+                )
         if action_type == "start_flow":
             if not action.get("flow"):
                 raise FlowDefinitionError(f"La accion {index} de '{node_id}' (start_flow) necesita 'flow'.")
@@ -1014,29 +1027,64 @@ class FlowRunner:
 
     async def _do_notify_app(self, action: dict[str, Any], context: dict[str, Any]) -> None:
         """El 'notificar a la bandeja': un evento firmado al callback de la
-        app duena (la bandeja de Connect ES la app - principio 45)."""
+        app duena (la bandeja de Connect ES la app - principio 45), y
+        ademas correo directo a admins/agentes si la accion trae 'emails'
+        (el caso "pidio hablar con un humano" no puede depender de que
+        alguien este mirando un panel)."""
+        message_text = interpolate(str(action["message"]), context)
+
         whatsapp = self._app.whatsapp
-        if whatsapp is None or not (whatsapp.callback_url and whatsapp.callback_secret):
+        if whatsapp is not None and whatsapp.callback_url and whatsapp.callback_secret:
+            payload = json.dumps(
+                {
+                    "object": "nexolu-comms",
+                    "event": "flow_notify",
+                    "flow": self._flow.name,
+                    "message": message_text,
+                    "business_id": self._contact.business_id,
+                    "contact": _contact_context(self._contact),
+                },
+                ensure_ascii=False,
+            ).encode()
+            headers = {
+                "Content-Type": "application/json",
+                "X-Nexolu-Event": "flow-notify",
+                **build_forward_headers(payload, whatsapp.callback_secret),
+            }
+            async with httpx.AsyncClient(timeout=HTTP_ACTION_TIMEOUT_SECONDS) as client:
+                await client.post(whatsapp.callback_url, content=payload, headers=headers)
+        else:
             logger.info("flows.notify_skipped_no_callback", extra={"app_id": self._app.app_id})
-            return
-        payload = json.dumps(
-            {
-                "object": "nexolu-comms",
-                "event": "flow_notify",
-                "flow": self._flow.name,
-                "message": interpolate(str(action["message"]), context),
-                "business_id": self._contact.business_id,
-                "contact": _contact_context(self._contact),
-            },
-            ensure_ascii=False,
-        ).encode()
-        headers = {
-            "Content-Type": "application/json",
-            "X-Nexolu-Event": "flow-notify",
-            **build_forward_headers(payload, whatsapp.callback_secret),
-        }
-        async with httpx.AsyncClient(timeout=HTTP_ACTION_TIMEOUT_SECONDS) as client:
-            await client.post(whatsapp.callback_url, content=payload, headers=headers)
+
+        emails = [str(e) for e in action.get("emails") or []]
+        if emails:
+            email_sender = get_channel_registry().resolve("email")
+            body = (
+                f"{message_text}\n\n"
+                f"Contacto: {self._contact.name or '(sin nombre)'} · {self._contact.phone}\n"
+                f"Flujo: {self._flow.name}\n"
+                f"Responde desde la bandeja: https://connect.nexolu.co/chat"
+            )
+            for email in emails:
+                result = await email_sender.send(
+                    self._app,
+                    OutboundMessage(
+                        to=email,
+                        subject=f"[Connect] {message_text[:80]}",
+                        text=body,
+                    ),
+                )
+                NotificationRepository(self._session).log(
+                    app_id=self._app.app_id,
+                    business_id=self._contact.business_id or self._app.app_id,
+                    channel="email",
+                    recipient=email,
+                    status=result.status,
+                    reference=f"flow:{self._flow.name}",
+                    provider_message_id=result.provider_message_id,
+                    error=result.error,
+                    cost_micros=result.cost_micros,
+                )
 
     async def _do_start_flow(self, action: dict[str, Any], flow_session: FlowSession) -> bool:
         """El goto de ManyChat: salta a otro flujo de la misma app (hereda
@@ -1093,6 +1141,23 @@ class FlowRunner:
                 "flows.send_failed",
                 extra={"flow_id": self._flow.id, "contact_id": self._contact.id, "error": result.error},
             )
+
+        # La bandeja tambien registra lo que el motor envia: la conversacion
+        # completa (humano + bot) se lee en un solo hilo.
+        self._session.add(
+            ChatMessage(
+                app_id=self._app.app_id,
+                business_id=self._contact.business_id,
+                contact_id=self._contact.id,
+                direction="out",
+                message_type=_outbound_chat_type(message),
+                body=message.text or message.media_caption or "",
+                payload=_outbound_chat_payload(message),
+                wamid=result.provider_message_id,
+                status=result.status,
+                origin="flow",
+            )
+        )
 
 
 def _is_safe_url(url: str) -> bool:
@@ -1223,6 +1288,10 @@ async def _handle_inbound_event(event_id: str) -> None:
         contact.last_inbound_at = datetime.utcnow()
         await session.flush()
 
+        # La bandeja: TODO mensaje entrante queda en el historial del chat,
+        # responda el motor o no (la conversacion humana vive aqui).
+        _log_inbound_chat(session, app.app_id, business_id, contact.id, event.payload, text)
+
         # 1) ¿Hay una sesion esperando en botones? La respuesta avanza el flujo.
         active = (
             await session.execute(
@@ -1296,6 +1365,74 @@ async def _handle_inbound_event(event_id: str) -> None:
                 )
                 return
         await session.commit()
+
+
+def _outbound_chat_type(message: OutboundMessage) -> str:
+    if message.media_kind:
+        return message.media_kind
+    if message.template_name:
+        return "template"
+    if message.list_rows:
+        return "list"
+    if message.buttons:
+        return "buttons"
+    if message.cta_url:
+        return "cta_url"
+    if message.product_retailer_id or message.product_sections or message.send_catalog:
+        return "product"
+    return "text"
+
+
+def _outbound_chat_payload(message: OutboundMessage) -> dict[str, Any]:
+    """Lo minimo para pintar la burbuja rica en la bandeja."""
+    payload: dict[str, Any] = {}
+    if message.buttons:
+        payload["buttons"] = message.buttons
+    if message.list_rows:
+        payload["rows"] = message.list_rows
+        payload["list_button"] = message.list_button
+    if message.cta_url:
+        payload["cta_url"] = message.cta_url
+        payload["cta_title"] = message.cta_title
+    if message.media_kind:
+        payload["media_kind"] = message.media_kind
+        payload["media_url"] = message.media_url
+    if message.template_name:
+        payload["template"] = message.template_name
+        payload["language"] = message.template_language
+    return payload
+
+
+def _log_inbound_chat(
+    session: AsyncSession,
+    app_id: str,
+    business_id: str,
+    contact_id: str,
+    raw_payload: str,
+    parsed_text: str | None,
+) -> None:
+    """Guarda el mensaje entrante en el historial del chat (fail-soft: la
+    bandeja nunca puede tumbar el procesamiento del webhook)."""
+    try:
+        raw = json.loads(raw_payload)["entry"][0]["changes"][0]["value"]["messages"][0]
+    except (ValueError, KeyError, IndexError, TypeError):
+        return
+    message_type = str(raw.get("type") or "text")
+    body = parsed_text or ""
+    if not body and isinstance(raw.get(message_type), dict):
+        body = str(raw[message_type].get("caption") or "")
+    session.add(
+        ChatMessage(
+            app_id=app_id,
+            business_id=business_id,
+            contact_id=contact_id,
+            direction="in",
+            message_type=message_type,
+            body=body,
+            payload=raw,
+            wamid=str(raw.get("id") or "") or None,
+        )
+    )
 
 
 def _match_choice(
