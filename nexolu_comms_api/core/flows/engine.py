@@ -81,6 +81,23 @@ ManyChat):
              Ids de opcion unicos por nodo. Si algun bloque tiene botones
              o el ultimo es list/capture, el nodo ESPERA; si no, sigue
              por `next`.
+  `actions` el "Realiza las siguientes acciones..." de ManyChat, con el
+             guardrail de Connect: {"actions": [...], "next"?} - 1 a 10
+             acciones en orden, sin enviar mensajes:
+               {"type":"add_tags"|"remove_tags","tags":[...]}
+               {"type":"set_fields","fields":{k:v interpolable}}
+               {"type":"clear_fields","fields":[k...]}
+               {"type":"http_request","method":"GET|POST","url",
+                "headers"?,"body"?,"save"?:{campo:"ruta.de.respuesta"}}
+                 - la "Solicitud externa": pega a la API del negocio y
+                   guarda partes de la respuesta en custom fields.
+                   Fail-soft: API caida = log, el flujo sigue.
+               {"type":"notify_app","message"} - evento flow_notify
+                 FIRMADO al callback de la app duena (la bandeja de
+                 Connect ES la app).
+               {"type":"start_flow","flow"} - salta a otro flujo de la
+                 app (ULTIMA accion; hereda variables; supersede esta
+                 sesion). El goto que evita arboles gigantes.
   `product` {"retailer_id": <b{negocio}-{sku}>, "text"?, "next"?} - UN
              producto del catalogo (SPM); o {"header"?, "sections":
              [{"title", "retailer_ids": [...]}]} - varios (MPM, max 10
@@ -110,13 +127,16 @@ anterior del contacto - el flujo mas reciente gana, como en ManyChat.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 import logging
 import random
 import re
 from datetime import datetime, timedelta
 from typing import Any
+from urllib.parse import urlparse
 
+import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -127,6 +147,7 @@ from nexolu_comms_api.core.channels.registry import get_channel_registry
 from nexolu_comms_api.core.db.entities import Contact, Flow, FlowSession, WebhookEvent
 from nexolu_comms_api.core.db.repository import NotificationRepository
 from nexolu_comms_api.core.db.session import get_sessionmaker
+from nexolu_comms_api.core.webhooks.signing import build_forward_headers
 
 logger = logging.getLogger(__name__)
 
@@ -149,7 +170,24 @@ VALID_NODE_TYPES = (
     "template",
     "product",
     "blocks",
+    "actions",
 )
+
+# El nodo Acciones (paridad con "Realiza las siguientes acciones..." de
+# ManyChat, filtrado por el guardrail de Connect: la accion de NEGOCIO
+# vive en la app duena - por eso notify_app y http_request en vez de
+# tocar inventario/citas desde aca).
+ACTION_TYPES = (
+    "add_tags",
+    "remove_tags",
+    "set_fields",
+    "clear_fields",
+    "http_request",
+    "notify_app",
+    "start_flow",
+)
+MAX_ACTIONS_PER_NODE = 10
+HTTP_ACTION_TIMEOUT_SECONDS = 6  # una API lenta no puede colgar el flujo
 
 # El paso "Enviar mensaje" de ManyChat: UN nodo `blocks` = una PILA de
 # bloques de contenido que se envian seguidos (texto+botones, multimedia,
@@ -268,6 +306,9 @@ def validate_definition(definition: dict[str, Any]) -> None:
         if node_type == "blocks":
             _validate_blocks(node_id, node, nodes)
 
+        if node_type == "actions":
+            _validate_actions(node_id, node)
+
         if node_type == "product":
             sections = node.get("sections")
             if not node.get("retailer_id") and not sections:
@@ -326,6 +367,58 @@ def validate_definition(definition: dict[str, Any]) -> None:
                     raise FlowDefinitionError(
                         f"La rama {index} de '{node_id}' apunta a nodo inexistente: {branch['next']!r}."
                     )
+
+
+def _validate_actions(node_id: str, node: dict[str, Any]) -> None:
+    actions = node.get("actions")
+    if not isinstance(actions, list) or not (1 <= len(actions) <= MAX_ACTIONS_PER_NODE):
+        raise FlowDefinitionError(
+            f"El nodo '{node_id}' (actions) necesita entre 1 y {MAX_ACTIONS_PER_NODE} 'actions'."
+        )
+    for index, action in enumerate(actions):
+        if not isinstance(action, dict) or action.get("type") not in ACTION_TYPES:
+            raise FlowDefinitionError(
+                f"La accion {index} de '{node_id}' necesita type en: {', '.join(ACTION_TYPES)}."
+            )
+        action_type = action["type"]
+        is_last = index == len(actions) - 1
+
+        if action_type in ("add_tags", "remove_tags"):
+            tags = action.get("tags")
+            if not (isinstance(tags, list) and tags and all(isinstance(t, str) and t for t in tags)):
+                raise FlowDefinitionError(f"La accion {index} de '{node_id}' necesita 'tags' no vacios.")
+        if action_type == "set_fields":
+            fields = action.get("fields")
+            if not (isinstance(fields, dict) and fields):
+                raise FlowDefinitionError(f"La accion {index} de '{node_id}' necesita 'fields'.")
+        if action_type == "clear_fields":
+            fields = action.get("fields")
+            if not (isinstance(fields, list) and fields):
+                raise FlowDefinitionError(
+                    f"La accion {index} de '{node_id}' necesita 'fields' (lista de campos a borrar)."
+                )
+        if action_type == "http_request":
+            if str(action.get("method", "GET")).upper() not in ("GET", "POST"):
+                raise FlowDefinitionError(f"La accion {index} de '{node_id}': method GET o POST.")
+            url = str(action.get("url", ""))
+            if not url.startswith(("http://", "https://")):
+                raise FlowDefinitionError(f"La accion {index} de '{node_id}' necesita 'url' http(s).")
+            save = action.get("save")
+            if save is not None and not (
+                isinstance(save, dict) and all(isinstance(v, str) for v in save.values())
+            ):
+                raise FlowDefinitionError(
+                    f"El 'save' de la accion {index} de '{node_id}' es {{campo: ruta.de.respuesta}}."
+                )
+        if action_type == "notify_app" and not action.get("message"):
+            raise FlowDefinitionError(f"La accion {index} de '{node_id}' (notify_app) necesita 'message'.")
+        if action_type == "start_flow":
+            if not action.get("flow"):
+                raise FlowDefinitionError(f"La accion {index} de '{node_id}' (start_flow) necesita 'flow'.")
+            if not is_last:
+                raise FlowDefinitionError(
+                    f"start_flow debe ser la ULTIMA accion de '{node_id}': salta a otro flujo."
+                )
 
 
 def _validate_blocks(node_id: str, node: dict[str, Any], nodes: dict[str, Any]) -> None:
@@ -651,6 +744,15 @@ class FlowRunner:
                 node_id = _resolve_condition(node, context)
                 continue
 
+            if node["type"] == "actions":
+                jumped = await self._run_actions(node, flow_session, context)
+                if jumped:
+                    # start_flow arranco OTRO flujo: esa llamada ya
+                    # supersedio esta sesion - nada mas que escribir aqui.
+                    return
+                node_id = node.get("next")
+                continue
+
             if node["type"] == "random":
                 # Aleatorizador (A/B de ManyChat): tira el dado ponderado y
                 # sigue. Se re-tira en cada corrida a proposito - un split
@@ -817,6 +919,155 @@ class FlowRunner:
             )
             await self._deliver(message)
 
+    async def _run_actions(
+        self, node: dict[str, Any], flow_session: FlowSession, context: dict[str, Any]
+    ) -> bool:
+        """Ejecuta las acciones del nodo en orden. @return True si la ultima
+        fue start_flow (esta sesion quedo superseded por el flujo nuevo).
+        Todo es fail-soft: una API caida deja log, nunca rompe el flujo."""
+        for action in node.get("actions", []):
+            action_type = action.get("type")
+            try:
+                if action_type == "add_tags":
+                    self._contact.tags = list(
+                        dict.fromkeys([*self._contact.tags, *[str(t) for t in action["tags"]]])
+                    )
+                elif action_type == "remove_tags":
+                    gone = {str(t) for t in action["tags"]}
+                    self._contact.tags = [t for t in self._contact.tags if t not in gone]
+                elif action_type == "set_fields":
+                    self._contact.fields = {
+                        **self._contact.fields,
+                        **{str(k): interpolate(str(v), context) for k, v in action["fields"].items()},
+                    }
+                elif action_type == "clear_fields":
+                    gone = {str(k) for k in action["fields"]}
+                    self._contact.fields = {
+                        k: v for k, v in self._contact.fields.items() if k not in gone
+                    }
+                elif action_type == "http_request":
+                    await self._do_http_request(action, context)
+                elif action_type == "notify_app":
+                    await self._do_notify_app(action, context)
+                elif action_type == "start_flow" and await self._do_start_flow(
+                    action, flow_session
+                ):
+                    return True
+                # El contexto se rearma con lo que cada accion cambio.
+                context = {**flow_session.context, "contact": _contact_context(self._contact)}
+            except Exception:
+                logger.exception(
+                    "flows.action_failed",
+                    extra={"flow_id": self._flow.id, "action": action_type},
+                )
+        return False
+
+    async def _do_http_request(self, action: dict[str, Any], context: dict[str, Any]) -> None:
+        """La 'Solicitud externa' de ManyChat: pega a la API del negocio con
+        el contexto interpolado y (opcional) guarda partes de la respuesta
+        en los custom fields del contacto."""
+        url = interpolate(str(action["url"]), context)
+        if not _is_safe_url(url):
+            logger.warning("flows.http_action_blocked", extra={"url": url[:120]})
+            return
+        method = str(action.get("method", "GET")).upper()
+        headers = {
+            str(k): interpolate(str(v), context) for k, v in (action.get("headers") or {}).items()
+        }
+        body = _interpolate_deep(action.get("body"), context)
+
+        async with httpx.AsyncClient(timeout=HTTP_ACTION_TIMEOUT_SECONDS) as client:
+            if method == "POST":
+                response = await client.post(url, json=body, headers=headers)
+            else:
+                response = await client.get(url, headers=headers)
+
+        if response.status_code >= 400:
+            logger.warning(
+                "flows.http_action_error",
+                extra={"url": url[:120], "status": response.status_code},
+            )
+            return
+
+        save = action.get("save") or {}
+        if save:
+            try:
+                data = response.json()
+            except ValueError:
+                logger.warning("flows.http_action_not_json", extra={"url": url[:120]})
+                return
+            updates: dict[str, str] = {}
+            for campo, ruta in save.items():
+                value: Any = data
+                for part in str(ruta).split("."):
+                    if isinstance(value, dict) and part in value:
+                        value = value[part]
+                    elif isinstance(value, list) and part.isdigit() and int(part) < len(value):
+                        value = value[int(part)]
+                    else:
+                        value = None
+                        break
+                if value is not None:
+                    updates[str(campo)] = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+            if updates:
+                self._contact.fields = {**self._contact.fields, **updates}
+
+    async def _do_notify_app(self, action: dict[str, Any], context: dict[str, Any]) -> None:
+        """El 'notificar a la bandeja': un evento firmado al callback de la
+        app duena (la bandeja de Connect ES la app - principio 45)."""
+        whatsapp = self._app.whatsapp
+        if whatsapp is None or not (whatsapp.callback_url and whatsapp.callback_secret):
+            logger.info("flows.notify_skipped_no_callback", extra={"app_id": self._app.app_id})
+            return
+        payload = json.dumps(
+            {
+                "object": "nexolu-comms",
+                "event": "flow_notify",
+                "flow": self._flow.name,
+                "message": interpolate(str(action["message"]), context),
+                "business_id": self._contact.business_id,
+                "contact": _contact_context(self._contact),
+            },
+            ensure_ascii=False,
+        ).encode()
+        headers = {
+            "Content-Type": "application/json",
+            "X-Nexolu-Event": "flow-notify",
+            **build_forward_headers(payload, whatsapp.callback_secret),
+        }
+        async with httpx.AsyncClient(timeout=HTTP_ACTION_TIMEOUT_SECONDS) as client:
+            await client.post(whatsapp.callback_url, content=payload, headers=headers)
+
+    async def _do_start_flow(self, action: dict[str, Any], flow_session: FlowSession) -> bool:
+        """El goto de ManyChat: salta a otro flujo de la misma app (hereda
+        las variables del contexto). start_flow() supersede esta sesion."""
+        target = (
+            await self._session.execute(
+                select(Flow).where(
+                    Flow.app_id == self._app.app_id,
+                    Flow.business_id.in_(["", self._contact.business_id]),
+                    Flow.name == str(action["flow"]),
+                    Flow.is_active.is_(True),
+                )
+            )
+        ).scalars().first()
+        if target is None or target.id == self._flow.id:
+            logger.warning(
+                "flows.start_flow_missing",
+                extra={"flow_id": self._flow.id, "target": str(action["flow"])[:64]},
+            )
+            return False
+        await start_flow(
+            self._session,
+            self._app,
+            target,
+            phone=self._contact.phone,
+            business_id=self._contact.business_id or None,
+            variables=dict(flow_session.context),
+            contact_name=self._contact.name,
+        )
+        return True
+
     async def _deliver(self, message: OutboundMessage) -> None:
         identity, _ = await resolve_whatsapp_identity(
             self._session, self._app, self._contact.business_id or self._app.app_id
@@ -842,6 +1093,37 @@ class FlowRunner:
                 "flows.send_failed",
                 extra={"flow_id": self._flow.id, "contact_id": self._contact.id, "error": result.error},
             )
+
+
+def _is_safe_url(url: str) -> bool:
+    """Guardas minimas contra SSRF para la solicitud externa: solo http(s)
+    y nunca hacia loopback/privadas - el panel es de confianza, la red
+    interna del droplet no tiene por que estar expuesta a un typo."""
+    try:
+        parsed = urlparse(url)
+    except ValueError:
+        return False
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return False
+    host = parsed.hostname
+    if host.lower() in ("localhost",):
+        return False
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return True  # hostname DNS: permitido
+    return not (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_unspecified)
+
+
+def _interpolate_deep(value: Any, context: dict[str, Any]) -> Any:
+    """Interpola {{variables}} dentro de un body JSON anidado."""
+    if isinstance(value, str):
+        return interpolate(value, context)
+    if isinstance(value, dict):
+        return {k: _interpolate_deep(v, context) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_interpolate_deep(v, context) for v in value]
+    return value
 
 
 def _pick_random_branch(node: dict[str, Any]) -> str | None:

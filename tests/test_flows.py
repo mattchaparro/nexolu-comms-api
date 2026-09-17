@@ -886,6 +886,142 @@ def test_product_node_sends_spm_and_mpm(client, platform_headers, httpx_mock):
     assert [s["title"] for s in mpm["interactive"]["action"]["sections"]] == ["Manos", "Pies"]
 
 
+# --- nodo actions: el "Realiza las siguientes acciones..." de ManyChat --------
+
+ACTIONS_FLOW = {
+    "start": "consultar",
+    "nodes": {
+        "consultar": {
+            "type": "actions",
+            "next": "ofrecer",
+            "actions": [
+                {"type": "add_tags", "tags": ["consulto_disponibilidad"]},
+                {"type": "set_fields", "fields": {"origen": "flujo"}},
+                {
+                    "type": "http_request",
+                    "method": "GET",
+                    "url": "https://api.luxurynails.test/disponibilidad?tel={{contact.phone}}",
+                    "save": {"proxima_hora": "disponible.hora", "profesional": "disponible.con"},
+                },
+                {"type": "notify_app", "message": "{{contact.name}} consultó disponibilidad"},
+            ],
+        },
+        "ofrecer": {
+            "type": "message",
+            "text": "Te sirve {{contact.fields.proxima_hora}} con {{contact.fields.profesional}}?",
+        },
+    },
+}
+
+JUMP_FLOW_A = {
+    "start": "salto",
+    "nodes": {
+        "salto": {
+            "type": "actions",
+            "actions": [{"type": "start_flow", "flow": "destino"}],
+        },
+    },
+}
+
+JUMP_FLOW_B = {
+    "start": "hola",
+    "nodes": {"hola": {"type": "message", "text": "Llegaste al flujo destino."}},
+}
+
+
+@pytest.mark.parametrize(
+    ("definition", "expected"),
+    [
+        ({"start": "a", "nodes": {"a": {"type": "actions"}}}, "actions"),
+        (
+            {"start": "a", "nodes": {"a": {"type": "actions", "actions": [{"type": "nope"}]}}},
+            "type en",
+        ),
+        (
+            {"start": "a", "nodes": {"a": {"type": "actions", "actions": [{"type": "add_tags", "tags": []}]}}},
+            "tags",
+        ),
+        (
+            {
+                "start": "a",
+                "nodes": {"a": {"type": "actions", "actions": [{"type": "http_request", "url": "ftp://x"}]}},
+            },
+            "http",
+        ),
+        (
+            {
+                "start": "a",
+                "nodes": {
+                    "a": {
+                        "type": "actions",
+                        "actions": [
+                            {"type": "start_flow", "flow": "x"},
+                            {"type": "add_tags", "tags": ["t"]},
+                        ],
+                    }
+                },
+            },
+            "ULTIMA",
+        ),
+    ],
+)
+def test_validate_rejects_broken_actions_nodes(definition, expected):
+    with pytest.raises(FlowDefinitionError, match=expected):
+        validate_definition(definition)
+
+
+def test_actions_node_runs_http_request_and_notifies_the_app(
+    client, platform_headers, auth_headers, httpx_mock
+):
+    """El circuito de la 'Solicitud externa': tags + campos + GET a la API
+    del negocio (respuesta -> custom fields) + evento firmado al callback,
+    y el mensaje siguiente interpola lo guardado."""
+    _create_flow(client, platform_headers, name="disponibilidad", definition=ACTIONS_FLOW)
+
+    httpx_mock.add_response(
+        url="https://api.luxurynails.test/disponibilidad?tel=573001112233",
+        json={"disponible": {"hora": "mañana 3pm", "con": "María"}},
+    )
+    httpx_mock.add_response(url=CALLBACK_URL, json={"ok": True})  # notify_app
+    httpx_mock.add_response(url=MESSAGES_URL, json={"messages": [{"id": "wamid.1"}]})
+
+    response = _trigger(client, auth_headers, flow="disponibilidad")
+    assert response.json()["status"] == "completed"
+
+    # El mensaje final interpola lo que la API respondio.
+    sent = json.loads(httpx_mock.get_requests(url=MESSAGES_URL)[0].content)
+    assert sent["text"]["body"] == "Te sirve mañana 3pm con María?"
+
+    # El contacto quedo con tag, campo propio y campos de la respuesta.
+    contacts = client.get("/v1/admin/contacts", headers=platform_headers).json()["items"]
+    contact = next(c for c in contacts if c["phone"] == "573001112233")
+    assert "consulto_disponibilidad" in contact["tags"]
+    assert contact["fields"]["origen"] == "flujo"
+    assert contact["fields"]["profesional"] == "María"
+
+    # La notificacion a la app: evento flow_notify FIRMADO al callback.
+    notify = [r for r in httpx_mock.get_requests(url=CALLBACK_URL) if b"flow_notify" in r.content]
+    assert len(notify) == 1
+    body = json.loads(notify[0].content)
+    assert body["message"] == "Laura consultó disponibilidad"
+    assert notify[0].headers.get("X-Nexolu-Event") == "flow-notify"
+
+
+def test_start_flow_action_jumps_to_another_flow(
+    client, platform_headers, auth_headers, httpx_mock
+):
+    _create_flow(client, platform_headers, name="origen", definition=JUMP_FLOW_A)
+    _create_flow(client, platform_headers, name="destino", definition=JUMP_FLOW_B)
+
+    httpx_mock.add_response(url=MESSAGES_URL, json={"messages": [{"id": "wamid.1"}]})
+    _trigger(client, auth_headers, flow="origen")
+
+    sent = json.loads(httpx_mock.get_requests(url=MESSAGES_URL)[0].content)
+    assert sent["text"]["body"] == "Llegaste al flujo destino."
+    # La sesion del flujo origen quedo superseded por la del destino.
+    assert sorted(_session_statuses()) == ["completed", "superseded"]
+
+
 # --- nodo blocks: el paso "Enviar mensaje" de ManyChat ------------------------
 
 # El caso real calcado de "Mis citas" de Luxury: imagen + texto con las
