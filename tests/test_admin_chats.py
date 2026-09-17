@@ -3,6 +3,7 @@ webhook + salientes del motor y del panel) y la respuesta humana desde el
 panel - la UNICA via cuando el numero no tiene app movil ni SIM."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -60,8 +61,10 @@ def test_the_inbox_shows_the_full_thread_and_replies(client, platform_headers, h
     assert convo["window_open"] is True
 
     # 2. El negocio responde desde el panel (sin celular): sale por la misma
-    #    identidad de WhatsApp y queda en el hilo como out/panel.
+    #    identidad de WhatsApp y queda en el hilo como out/panel. Ademas
+    #    avisa a la app duena (human_reply) para que su bot se calle.
     httpx_mock.add_response(url=MESSAGES_URL, json={"messages": [{"id": "wamid.reply"}]})
+    httpx_mock.add_response(url=CALLBACK_URL, json={"ok": True})
     sent = client.post(
         f"/v1/admin/chats/{convo['contact_id']}/messages",
         headers=platform_headers,
@@ -82,6 +85,116 @@ def test_the_inbox_shows_the_full_thread_and_replies(client, platform_headers, h
     # 4. Y la conversacion refleja el ultimo saliente.
     conversations = client.get("/v1/admin/chats", headers=platform_headers).json()
     assert conversations[0]["last_direction"] == "out"
+
+
+def _seed_template(name: str, status: str = "APPROVED", reason: str | None = None) -> None:
+    from nexolu_comms_api.core.db.entities import WhatsAppTemplate
+    from nexolu_comms_api.core.db.session import get_sessionmaker
+
+    async def seed():
+        async with get_sessionmaker()() as session:
+            session.add(
+                WhatsAppTemplate(
+                    app_id="pos",
+                    waba_id="",
+                    name=name,
+                    language="es",
+                    category="UTILITY",
+                    status=status,
+                    reason=reason,
+                )
+            )
+            await session.commit()
+
+    asyncio.run(seed())
+
+
+def test_the_panel_can_reopen_a_cold_conversation_with_a_template(
+    client, platform_headers, httpx_mock
+):
+    """Fuera de la ventana de 24h el texto libre no entrega: la plantilla es
+    la UNICA salida, y por eso el panel debe poder mandarla."""
+    assert _inbound_text(client, httpx_mock, "¿Siguen abiertos?").status_code == 200
+    contact_id = client.get("/v1/admin/chats", headers=platform_headers).json()[0]["contact_id"]
+    _seed_template("recordatorio_cita")
+
+    httpx_mock.add_response(url=MESSAGES_URL, json={"messages": [{"id": "wamid.tpl"}]})
+    httpx_mock.add_response(url=CALLBACK_URL, json={"ok": True})
+    sent = client.post(
+        f"/v1/admin/chats/{contact_id}/messages",
+        headers=platform_headers,
+        json={"template": {"name": "recordatorio_cita", "language": "es", "params": ["Laura", "3pm"]}},
+    )
+    assert sent.status_code == 201, sent.text
+    assert sent.json()["message_type"] == "template"
+    # El hilo guarda lo que el operador vio al enviar (el cuerpo lo tiene Meta).
+    assert sent.json()["body"] == "[plantilla recordatorio_cita] Laura · 3pm"
+
+    outbound = json.loads(httpx_mock.get_requests(url=MESSAGES_URL)[0].content)
+    assert outbound["type"] == "template"
+    assert outbound["template"]["name"] == "recordatorio_cita"
+    assert outbound["template"]["components"][0]["parameters"][0]["text"] == "Laura"
+
+
+def test_a_template_the_mirror_knows_is_rejected_never_reaches_meta(
+    client, platform_headers, httpx_mock
+):
+    assert _inbound_text(client, httpx_mock, "Hola").status_code == 200
+    contact_id = client.get("/v1/admin/chats", headers=platform_headers).json()[0]["contact_id"]
+    _seed_template("promo_vieja", status="REJECTED", reason="Contenido promocional")
+
+    refused = client.post(
+        f"/v1/admin/chats/{contact_id}/messages",
+        headers=platform_headers,
+        json={"template": {"name": "promo_vieja", "language": "es"}},
+    )
+    assert refused.status_code == 409
+    assert "REJECTED" in refused.json()["detail"]
+    assert httpx_mock.get_requests(url=MESSAGES_URL) == []
+
+
+def test_sending_needs_exactly_one_of_text_or_template(client, platform_headers, httpx_mock):
+    assert _inbound_text(client, httpx_mock, "Hola").status_code == 200
+    contact_id = client.get("/v1/admin/chats", headers=platform_headers).json()[0]["contact_id"]
+
+    for body in ({}, {"text": "hola", "template": {"name": "x"}}):
+        assert (
+            client.post(
+                f"/v1/admin/chats/{contact_id}/messages", headers=platform_headers, json=body
+            ).status_code
+            == 422
+        )
+
+
+def test_a_human_reply_from_the_panel_tells_the_app_to_hush_its_bot(
+    client, platform_headers, httpx_mock
+):
+    """Sin este aviso el bot de la app contesta encima de la persona que
+    esta atendiendo: el saliente del panel no pasa por la app."""
+    assert _inbound_text(client, httpx_mock, "¿Tienen hora hoy?").status_code == 200
+    contact_id = client.get("/v1/admin/chats", headers=platform_headers).json()[0]["contact_id"]
+
+    httpx_mock.add_response(url=MESSAGES_URL, json={"messages": [{"id": "wamid.h"}]})
+    httpx_mock.add_response(url=CALLBACK_URL, json={"ok": True})
+    sent = client.post(
+        f"/v1/admin/chats/{contact_id}/messages",
+        headers=platform_headers,
+        json={"text": "Sí, a las 4pm te esperamos."},
+    )
+    assert sent.status_code == 201
+
+    aviso = [
+        r
+        for r in httpx_mock.get_requests(url=CALLBACK_URL)
+        if r.headers.get("X-Nexolu-Event") == "human-reply"
+    ]
+    assert len(aviso) == 1
+    body = json.loads(aviso[0].content)
+    assert body["event"] == "human_reply"
+    assert body["contact"]["phone"] == "573001112233"
+    assert body["message"]["text"] == "Sí, a las 4pm te esperamos."
+    # Firmado como todo lo que sale hacia la app duena.
+    assert "X-Nexolu-Signature" in aviso[0].headers
 
 
 def test_flow_sends_land_in_the_same_thread(client, platform_headers, auth_headers, httpx_mock):

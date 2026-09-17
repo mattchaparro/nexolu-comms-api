@@ -149,7 +149,7 @@ from nexolu_comms_api.core.chats import log_outbound_chat
 from nexolu_comms_api.core.db.entities import ChatMessage, Contact, Flow, FlowSession, WebhookEvent
 from nexolu_comms_api.core.db.repository import NotificationRepository
 from nexolu_comms_api.core.db.session import get_sessionmaker
-from nexolu_comms_api.core.webhooks.signing import build_forward_headers
+from nexolu_comms_api.core.webhooks.app_events import post_app_event
 
 logger = logging.getLogger(__name__)
 
@@ -1034,28 +1034,16 @@ class FlowRunner:
         alguien este mirando un panel)."""
         message_text = interpolate(str(action["message"]), context)
 
-        whatsapp = self._app.whatsapp
-        if whatsapp is not None and whatsapp.callback_url and whatsapp.callback_secret:
-            payload = json.dumps(
-                {
-                    "object": "nexolu-comms",
-                    "event": "flow_notify",
-                    "flow": self._flow.name,
-                    "message": message_text,
-                    "business_id": self._contact.business_id,
-                    "contact": _contact_context(self._contact),
-                },
-                ensure_ascii=False,
-            ).encode()
-            headers = {
-                "Content-Type": "application/json",
-                "X-Nexolu-Event": "flow-notify",
-                **build_forward_headers(payload, whatsapp.callback_secret),
-            }
-            async with httpx.AsyncClient(timeout=HTTP_ACTION_TIMEOUT_SECONDS) as client:
-                await client.post(whatsapp.callback_url, content=payload, headers=headers)
-        else:
-            logger.info("flows.notify_skipped_no_callback", extra={"app_id": self._app.app_id})
+        await post_app_event(
+            self._app.whatsapp,
+            "flow_notify",
+            {
+                "flow": self._flow.name,
+                "message": message_text,
+                "business_id": self._contact.business_id,
+                "contact": _contact_context(self._contact),
+            },
+        )
 
         emails = [str(e) for e in action.get("emails") or []]
         if emails:
