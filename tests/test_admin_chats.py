@@ -251,6 +251,10 @@ def test_the_inbox_searches_by_name_phone_or_what_was_said(
     assert len(buscar("300111")) == 1
     assert buscar("pestañas") == []
 
+    # Sin tildes tambien: nadie las escribe al buscar.
+    assert len(buscar("acrilicas")) == 1
+    assert len(buscar("ACRILICAS")) == 1
+
 
 def test_assigning_says_who_is_attending_and_can_be_released(
     client, platform_headers, httpx_mock

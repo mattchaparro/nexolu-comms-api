@@ -11,6 +11,7 @@ entregaria; fuera de ventana el envio igual se intenta y Meta decide
 """
 from __future__ import annotations
 
+import unicodedata
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -40,6 +41,13 @@ WINDOW_HOURS = 24
 # reciente, que es lo que una bandeja atiende. El historial completo de un
 # contacto se lee en su hilo, no en la lista.
 MAX_CONVERSATIONS_SCANNED = 500
+
+
+def _fold(text: str) -> str:
+    """Minusculas y sin tildes, para comparar como escribe la gente: quien
+    busca "acrilicas" tiene que encontrar "acrílicas" (y al reves)."""
+    sin_tildes = unicodedata.normalize("NFD", text.strip().lower())
+    return "".join(c for c in sin_tildes if unicodedata.category(c) != "Mn")
 
 
 class ConversationOut(BaseModel):
@@ -162,7 +170,7 @@ async def list_conversations(
     }
 
     threshold = datetime.utcnow() - timedelta(hours=WINDOW_HOURS)
-    needle = (q or "").strip().lower()
+    needle = _fold(q or "")
     matched: list[ConversationOut] = []
     unread_total = 0
     seen: set[str] = set()
@@ -185,9 +193,9 @@ async def list_conversations(
             unread_total += 1
 
         if needle and not (
-            needle in contact.name.lower()
-            or needle in contact.phone.lower()
-            or needle in message.body.lower()
+            needle in _fold(contact.name)
+            or needle in _fold(contact.phone)
+            or needle in _fold(message.body)
         ):
             continue
         if only_unread and not unread:
