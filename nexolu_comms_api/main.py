@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 
 from nexolu_comms_api.api import panel, webhooks
 from nexolu_comms_api.api.v1 import (
+    admin_alerts,
     admin_apps,
     admin_catalog,
     admin_channels,
@@ -31,6 +32,7 @@ from nexolu_comms_api.api.v1 import (
     whatsapp,
 )
 from nexolu_comms_api.config import get_settings
+from nexolu_comms_api.core.alerts import alert_worker_loop
 from nexolu_comms_api.core.db.session import init_models
 from nexolu_comms_api.core.flows.engine import flow_resume_worker_loop
 from nexolu_comms_api.core.telemetry.logging import configure_logging
@@ -56,6 +58,10 @@ async def lifespan(app: FastAPI):
     # Reanuda los nodos `delay` de los flujos vencidos. Ver core/flows/engine.py.
     if settings.flow_resume_worker_enabled:
         workers.append(asyncio.create_task(flow_resume_worker_loop()))
+    # Avisa (agrupado) de las conversaciones que llevan rato sin responder:
+    # el panel solo avisa mientras alguien lo tiene abierto. Ver core/alerts.py.
+    if settings.inbox_alert_worker_enabled:
+        workers.append(asyncio.create_task(alert_worker_loop()))
 
     yield
 
@@ -103,6 +109,7 @@ def create_app() -> FastAPI:
     app.include_router(admin_catalog.router)
     app.include_router(admin_media.router)
     app.include_router(admin_chats.router)
+    app.include_router(admin_alerts.router)
     app.include_router(flows.router)
     app.include_router(catalog.router)
 

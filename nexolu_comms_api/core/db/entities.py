@@ -330,6 +330,10 @@ class Contact(Base):
     # se entera; sin "quien atiende", dos personas contestan lo mismo.
     last_read_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     assigned_to: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Ultima vez que este hilo entro en un aviso de "sin responder". Evita
+    # repetir el mismo aviso cada vuelta del worker: se vuelve a avisar solo
+    # si llego algo NUEVO despues (ver core/alerts.py).
+    alerted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -517,3 +521,40 @@ class Notification(Base):
     # via Brevo) - no es lo mismo que "cost=0". Ver core/telemetry/usage.py.
     cost_micros: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class InboxAlertConfig(Base):
+    """A quien se le avisa que hay conversaciones sin responder.
+
+    Vive en Connect y no en la app dueña porque es una regla sobre la
+    BANDEJA (que es de Connect), no sobre el negocio. Los avisos de negocio
+    -- agendo, cancelo -- los manda la app, que es la que sabe de citas.
+
+    Un solo config por (app, negocio). `business_id` "" = vale para toda la
+    app (el numero compartido), misma convencion que Contact y Flow.
+    """
+
+    __tablename__ = "inbox_alert_configs"
+    __table_args__ = (
+        UniqueConstraint("app_id", "business_id", name="uq_inbox_alert_scope"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    app_id: Mapped[str] = mapped_column(String(64))
+    business_id: Mapped[str] = mapped_column(String(64), default="")
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # A quien le llega el correo agrupado.
+    emails: Mapped[list[str]] = mapped_column(JSON, default=list)
+    # Telefono del duenio/encargada para el aviso por WhatsApp. Solo se usa
+    # si su ventana de 24h esta abierta (texto libre, gratis); si esta
+    # cerrada, el aviso urgente cae a esta plantilla y el resto espera al
+    # correo. Ver core/alerts.py.
+    whatsapp_to: Mapped[str] = mapped_column(String(32), default="")
+    urgent_template: Mapped[str] = mapped_column(String(191), default="")
+    urgent_template_language: Mapped[str] = mapped_column(String(16), default="es")
+    # Minutos que una conversacion puede quedarse sin responder antes de
+    # que se avise. Por debajo de esto no se molesta a nadie: el bot suele
+    # estar contestando.
+    quiet_minutes: Mapped[int] = mapped_column(Integer, default=10)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

@@ -192,6 +192,13 @@ class Settings(BaseSettings):
     flow_resume_worker_enabled: bool = True
     flow_resume_interval_seconds: int = 30
 
+    # Avisos de bandeja ("hay conversaciones sin responder"). El intervalo
+    # es del WORKER, no del aviso: cuanto espera una conversacion antes de
+    # entrar en un aviso lo decide `quiet_minutes` de cada config, que el
+    # negocio ajusta desde el panel. Ver core/alerts.py.
+    inbox_alert_worker_enabled: bool = True
+    inbox_alert_interval_seconds: int = 120
+
     # Multimedia subida desde el panel (bloque Imagen del builder): se
     # guarda plana en MEDIA_DIR y se sirve publica en /media/<nombre> -
     # Meta descarga por URL. MEDIA_BASE_URL en prod = https://comms.nexolu.co
