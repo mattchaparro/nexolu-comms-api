@@ -88,6 +88,29 @@ class WhatsAppCatalogIn(BaseModel):
     footer: str | None = None
 
 
+class WhatsAppOptionIn(BaseModel):
+    id: str = Field(min_length=1, max_length=191)
+    title: str = Field(min_length=1, max_length=24)  # tope de Meta
+    description: str | None = Field(default=None, max_length=72)
+
+
+class WhatsAppOptionsIn(BaseModel):
+    """Opciones tocables: botones (hasta 3) o lista (hasta 10).
+
+    Existe para que el BOT de una app pueda ofrecer horas o servicios sin
+    obligar a la clienta a escribirlas -- hasta ahora eso solo lo podian
+    hacer los flujos, y el bot solo mandaba texto. Elegir por toque es la
+    diferencia entre agendar y abandonar.
+
+    La respuesta vuelve por el webhook como el TITULO tocado, asi que la
+    app la lee igual que si lo hubieran escrito.
+    """
+
+    options: list[WhatsAppOptionIn] = Field(min_length=1, max_length=10)
+    # Solo para lista (4+ opciones): el texto del boton que la abre.
+    button: str = Field(default="Ver opciones", max_length=20)
+
+
 class SendRequest(BaseModel):
     # Clave de particion OPACA que la app define para agrupar sus propios
     # reportes de uso (ver GET /v1/usage/*) - este servicio nunca la valida
@@ -112,6 +135,7 @@ class SendRequest(BaseModel):
     )
     whatsapp_template: WhatsAppTemplateIn | None = None
     whatsapp_flow: WhatsAppFlowIn | None = None
+    whatsapp_options: WhatsAppOptionsIn | None = None
     whatsapp_product: WhatsAppProductIn | None = None
     whatsapp_products: WhatsAppProductsIn | None = None
     whatsapp_catalog: WhatsAppCatalogIn | None = None
@@ -321,6 +345,10 @@ def _build_message(recipient: str, payload: SendRequest) -> OutboundMessage:
     product = payload.whatsapp_product
     products = payload.whatsapp_products
     catalog = payload.whatsapp_catalog
+    options = payload.whatsapp_options
+    # Meta manda botones hasta 3 y lista de 4 en adelante: son dos payloads
+    # distintos, pero para quien llama es lo mismo ("dale a elegir esto").
+    as_buttons = bool(options) and len(options.options) <= 3
     return OutboundMessage(
         to=recipient,
         subject=payload.subject,
@@ -335,6 +363,14 @@ def _build_message(recipient: str, payload: SendRequest) -> OutboundMessage:
         flow_cta=flow.cta if flow else None,
         flow_token=flow.flow_token if flow else None,
         flow_data=flow.data if flow else {},
+        buttons=[{"id": o.id, "title": o.title} for o in options.options] if as_buttons else [],
+        list_rows=[
+            {"id": o.id, "title": o.title, **({"description": o.description} if o.description else {})}
+            for o in options.options
+        ]
+        if options and not as_buttons
+        else [],
+        list_button=options.button if options and not as_buttons else None,
         product_retailer_id=product.product_retailer_id if product else None,
         product_sections=products.sections if products else [],
         product_header=products.header if products else None,

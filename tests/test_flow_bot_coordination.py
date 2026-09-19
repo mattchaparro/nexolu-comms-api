@@ -214,3 +214,54 @@ def test_api_sends_land_in_the_same_thread_as_out_api(
     ).json()
     assert [(m["direction"], m["origin"]) for m in thread] == [("in", ""), ("out", "api")]
     assert thread[1]["body"] == "¡Claro! Mañana tengo 3pm y 5pm."
+
+
+def test_the_app_bot_can_offer_tappable_options(client, auth_headers, httpx_mock):
+    """Hasta ahora solo los flujos podian ofrecer botones: el bot de la app
+    solo mandaba texto, y escribir la hora a mano es donde la gente
+    abandona. Tres o menos = botones, cuatro o mas = lista."""
+    httpx_mock.add_response(url=MESSAGES_URL, json={"messages": [{"id": "wamid.b"}]})
+    botones = client.post(
+        "/v1/notifications/send",
+        headers=auth_headers,
+        json={
+            "channels": ["whatsapp"],
+            "to": {"whatsapp": "573001112233"},
+            "text": "¿Cuál te sirve?",
+            "whatsapp_options": {
+                "options": [{"id": "10", "title": "10 am"}, {"id": "15", "title": "3 pm"}]
+            },
+        },
+    )
+    assert botones.status_code == 200, botones.text
+    enviado = json.loads(httpx_mock.get_requests(url=MESSAGES_URL)[-1].content)
+    assert enviado["interactive"]["type"] == "button"
+    titulos = [b["reply"]["title"] for b in enviado["interactive"]["action"]["buttons"]]
+    assert titulos == ["10 am", "3 pm"]
+
+    httpx_mock.add_response(url=MESSAGES_URL, json={"messages": [{"id": "wamid.l"}]})
+    lista = client.post(
+        "/v1/notifications/send",
+        headers=auth_headers,
+        json={
+            "channels": ["whatsapp"],
+            "to": {"whatsapp": "573001112233"},
+            "text": "Estas son las horas libres:",
+            "whatsapp_options": {
+                "button": "Ver horas",
+                "options": [
+                    {"id": "9", "title": "9 am"},
+                    {"id": "10", "title": "10 am"},
+                    {"id": "13", "title": "1 pm"},
+                    {"id": "17", "title": "5 pm", "description": "con María"},
+                ],
+            },
+        },
+    )
+    assert lista.status_code == 200, lista.text
+    enviado = json.loads(httpx_mock.get_requests(url=MESSAGES_URL)[-1].content)
+    assert enviado["interactive"]["type"] == "list"
+    assert enviado["interactive"]["action"]["button"] == "Ver horas"
+    filas = enviado["interactive"]["action"]["sections"][0]["rows"]
+    assert len(filas) == 4
+    assert filas[-1]["description"] == "con María"
