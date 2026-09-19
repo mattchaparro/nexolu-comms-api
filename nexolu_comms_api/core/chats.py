@@ -38,6 +38,31 @@ def outbound_chat_type(message: OutboundMessage) -> str:
     return "text"
 
 
+def outbound_chat_body(message: OutboundMessage) -> str:
+    """Lo que se lee en la burbuja del hilo.
+
+    Una plantilla no lleva texto propio -- el cuerpo real lo tiene Meta --,
+    asi que se guarda lo que el negocio ENVIO: nombre y variables. Sin esto
+    las plantillas salen como burbujas vacias y el hilo se vuelve ilegible
+    justo donde mas importa (el mensaje con el que se reabre una
+    conversacion fria).
+    """
+    if message.text:
+        return message.text
+    if message.media_caption:
+        return message.media_caption
+    if message.template_name:
+        params = [
+            str(p.get("text", ""))
+            for component in message.template_components
+            if str(component.get("type", "")).lower() == "body"
+            for p in component.get("parameters", [])
+        ]
+        etiqueta = f"[plantilla {message.template_name}]"
+        return f"{etiqueta} " + " · ".join(params) if params else etiqueta
+    return ""
+
+
 def outbound_chat_payload(message: OutboundMessage) -> dict[str, Any]:
     """Lo minimo para pintar la burbuja rica en la bandeja."""
     payload: dict[str, Any] = {}
@@ -72,7 +97,7 @@ def log_outbound_chat(
         contact_id=contact.id,
         direction="out",
         message_type=outbound_chat_type(message),
-        body=message.text or message.media_caption or "",
+        body=outbound_chat_body(message),
         payload=outbound_chat_payload(message),
         wamid=result.provider_message_id,
         status=result.status,

@@ -399,11 +399,6 @@ async def send_message(
     # Contestar ES leer: si no, el hilo que acabas de atender sigue
     # apareciendo en negrita como pendiente.
     contact.last_read_at = datetime.utcnow()
-    if payload.template is not None:
-        # El cuerpo real lo tiene Meta; en el hilo se guarda lo que el
-        # operador vio al enviar (nombre + variables), que es lo que
-        # permite entender la conversacion despues.
-        message.body = _template_preview(payload.template)
     await session.commit()
 
     background_tasks.add_task(
@@ -437,12 +432,6 @@ async def send_message(
         origin=message.origin,
         created_at=message.created_at,
     )
-
-
-def _template_preview(template: ChatTemplateIn) -> str:
-    if not template.params:
-        return f"[plantilla {template.name}]"
-    return f"[plantilla {template.name}] " + " · ".join(template.params)
 
 
 async def _assert_template_sendable(
