@@ -265,3 +265,61 @@ def test_the_app_bot_can_offer_tappable_options(client, auth_headers, httpx_mock
     filas = enviado["interactive"]["action"]["sections"][0]["rows"]
     assert len(filas) == 4
     assert filas[-1]["description"] == "con María"
+
+
+def test_un_keyword_interrumpe_un_flujo_a_medias(client, platform_headers, httpx_mock):
+    """Quien escribe "menu" a mitad de camino esta pidiendo empezar de
+    nuevo. Antes eso era silencio: la sesion seguia esperando una fila que
+    ya nadie iba a tocar, y ni el flujo ni el bot contestaban."""
+    _create_keyword_flow(client, platform_headers)
+    client.post(
+        "/v1/admin/flows",
+        headers=platform_headers,
+        json={
+            "app_id": "pos",
+            "name": "menu",
+            "trigger_type": "keyword",
+            "trigger_keywords": ["menu"],
+            "definition": {
+                "start": "m",
+                "nodes": {
+                    "m": {
+                        "type": "buttons",
+                        "text": "¿Qué necesitas?",
+                        "buttons": [{"id": "a", "title": "Agendar"}],
+                    }
+                },
+            },
+        },
+    )
+
+    # Arranca el menú y queda esperando que toque un botón.
+    httpx_mock.add_response(url=MESSAGES_URL, json={"messages": [{"id": "wamid.m"}]})
+    httpx_mock.add_response(url=CALLBACK_URL, json={"ok": True})
+    assert _signed_inbound(client, _text("573001112233", "menu")).status_code == 200
+
+    # En vez de tocar, escribe otra vez el keyword: vuelve a empezar.
+    httpx_mock.add_response(url=MESSAGES_URL, json={"messages": [{"id": "wamid.m2"}]})
+    httpx_mock.add_response(url=CALLBACK_URL, json={"ok": True})
+    assert _signed_inbound(client, _text("573001112233", "menu")).status_code == 200
+
+    enviados = [json.loads(r.content) for r in httpx_mock.get_requests(url=MESSAGES_URL)]
+    assert len(enviados) == 2, "el keyword no interrumpió el flujo a medias"
+    assert httpx_mock.get_requests(url=CALLBACK_URL)[-1].headers["X-Nexolu-Flow-Handled"] == "1"
+
+
+def test_lo_que_no_es_keyword_sigue_siendo_del_bot_de_la_app(
+    client, platform_headers, httpx_mock
+):
+    """Interrumpir con un keyword no puede volverse "el motor se queda con
+    todo": si escribe algo libre, el bot de la app tiene que poder ayudar."""
+    _create_keyword_flow(client, platform_headers)
+
+    httpx_mock.add_response(url=MESSAGES_URL, json={"messages": [{"id": "wamid.h"}]})
+    httpx_mock.add_response(url=CALLBACK_URL, json={"ok": True})
+    assert _signed_inbound(client, _text("573001112233", "hola")).status_code == 200
+
+    httpx_mock.add_response(url=CALLBACK_URL, json={"ok": True})
+    assert _signed_inbound(client, _text("573001112233", "¿cuánto vale?")).status_code == 200
+
+    assert httpx_mock.get_requests(url=CALLBACK_URL)[-1].headers["X-Nexolu-Flow-Handled"] == "0"

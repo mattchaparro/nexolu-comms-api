@@ -1373,17 +1373,19 @@ async def _handle_inbound_event(event_id: str) -> None:
                 return
 
             chosen = _match_choice(node, button_id, text)
-            if chosen is None:
-                # Respondio otra cosa: la conversacion es de la app duena,
-                # el motor no insiste (flow_handled queda False: el bot de
-                # la app puede ayudar). La sesion sigue esperando.
-                await session.commit()
+            if chosen is not None:
+                event.flow_handled = True
+                await FlowRunner(session, app, flow, contact).run_from(active, chosen.get("next"))
                 return
-            event.flow_handled = True
-            await FlowRunner(session, app, flow, contact).run_from(active, chosen.get("next"))
-            return
 
-        # 2) Sin sesion: ¿algun keyword de un flujo activo matchea?
+            # Respondio otra cosa estando en medio de un flujo. Antes eso
+            # era silencio y la sesion se quedaba esperando para siempre:
+            # quien escribia "menu" a mitad de camino no conseguia nada.
+            # Un keyword INTERRUMPE (empezar de nuevo es lo que la persona
+            # esta pidiendo); si no es keyword, la conversacion es de la
+            # app duena y su bot puede ayudar.
+
+        # 2) ¿Algun keyword de un flujo activo matchea?
         if not text:
             await session.commit()
             return
