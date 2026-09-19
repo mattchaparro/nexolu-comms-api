@@ -126,6 +126,38 @@ class AssignIn(BaseModel):
     user_id: str | None = None
 
 
+class ContactCardOut(BaseModel):
+    """Lo que hay que saber de esta persona ANTES de contestarle.
+
+    Solo lo que Connect SABE: telefono, como se llama, sus tags, sus
+    campos, desde cuando escribe y las notas del equipo. Nada de citas ni
+    de pedidos -- eso es de la app duena, que es quien lo sabe de verdad
+    (principio 45); su ficha de negocio la pinta su propio panel al lado.
+    """
+
+    contact_id: str
+    app_id: str
+    business_id: str
+    phone: str
+    name: str
+    tags: list[str]
+    fields: dict[str, Any]
+    notes: str
+    window_open: bool
+    assigned_to: str | None
+    assigned_name: str | None
+    first_seen_at: datetime | None
+    last_inbound_at: datetime | None
+    messages_in: int
+    messages_out: int
+
+
+class ContactCardPatch(BaseModel):
+    name: str | None = Field(default=None, max_length=128)
+    tags: list[str] | None = None
+    notes: str | None = Field(default=None, max_length=4000)
+
+
 @router.get("", response_model=ConversationListOut)
 async def list_conversations(
     app_id: str | None = None,
@@ -224,6 +256,78 @@ async def list_conversations(
         unread_total=unread_total,
         has_more=len(matched) > offset + len(page),
     )
+
+
+async def _contact_card(session: AsyncSession, contact: Contact) -> ContactCardOut:
+    counts = dict(
+        (
+            await session.execute(
+                select(ChatMessage.direction, func.count())
+                .where(ChatMessage.contact_id == contact.id)
+                .group_by(ChatMessage.direction)
+            )
+        ).all()
+    )
+    first = (
+        await session.execute(
+            select(func.min(ChatMessage.created_at)).where(ChatMessage.contact_id == contact.id)
+        )
+    ).scalar()
+
+    assigned_name: str | None = None
+    if contact.assigned_to:
+        user = await session.get(PanelUser, contact.assigned_to)
+        assigned_name = (user.full_name or user.email) if user else None
+
+    threshold = datetime.utcnow() - timedelta(hours=WINDOW_HOURS)
+    return ContactCardOut(
+        contact_id=contact.id,
+        app_id=contact.app_id,
+        business_id=contact.business_id,
+        phone=contact.phone,
+        name=contact.name,
+        tags=list(contact.tags),
+        fields=dict(contact.fields),
+        notes=contact.notes,
+        window_open=bool(contact.last_inbound_at and contact.last_inbound_at > threshold),
+        assigned_to=contact.assigned_to,
+        assigned_name=assigned_name,
+        first_seen_at=first,
+        last_inbound_at=contact.last_inbound_at,
+        messages_in=int(counts.get("in", 0)),
+        messages_out=int(counts.get("out", 0)),
+    )
+
+
+@router.get("/{contact_id}", response_model=ContactCardOut)
+async def contact_card(
+    contact_id: str,
+    scope: PanelScope = Depends(get_panel_scope),
+    session: AsyncSession = Depends(get_session),
+) -> ContactCardOut:
+    return await _contact_card(session, await _contact_in_scope(session, contact_id, scope))
+
+
+@router.patch("/{contact_id}", response_model=ContactCardOut)
+async def update_contact_card(
+    contact_id: str,
+    payload: ContactCardPatch,
+    scope: PanelScope = Depends(get_panel_scope),
+    session: AsyncSession = Depends(get_session),
+) -> ContactCardOut:
+    contact = await _contact_in_scope(session, contact_id, scope)
+
+    if payload.name is not None:
+        contact.name = payload.name
+    if payload.tags is not None:
+        # Sin duplicados y sin vacios: una lista de tags con "vip" dos veces
+        # convierte cualquier filtro en un resultado raro.
+        contact.tags = list(dict.fromkeys(t.strip() for t in payload.tags if t.strip()))
+    if payload.notes is not None:
+        contact.notes = payload.notes
+
+    await session.commit()
+    return await _contact_card(session, contact)
 
 
 @router.post("/{contact_id}/read", status_code=status.HTTP_204_NO_CONTENT)

@@ -19,6 +19,7 @@ from nexolu_comms_api.api.v1 import (
     admin_flows,
     admin_media,
     admin_providers,
+    admin_quick_replies,
     admin_templates,
     admin_users,
     admin_webhooks,
@@ -110,6 +111,7 @@ def create_app() -> FastAPI:
     app.include_router(admin_media.router)
     app.include_router(admin_chats.router)
     app.include_router(admin_alerts.router)
+    app.include_router(admin_quick_replies.router)
     app.include_router(flows.router)
     app.include_router(catalog.router)
 

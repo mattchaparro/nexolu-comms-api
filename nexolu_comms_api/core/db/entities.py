@@ -334,6 +334,11 @@ class Contact(Base):
     # repetir el mismo aviso cada vuelta del worker: se vuelve a avisar solo
     # si llego algo NUEVO despues (ver core/alerts.py).
     alerted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Lo que quien atiende necesita recordar de esta persona ("alergica al
+    # acrilico", "siempre pide con Maria"). Vive en el contacto y no en un
+    # mensaje porque no es parte de la conversacion: es lo que se sabe de
+    # ella y hay que ver ANTES de contestar.
+    notes: Mapped[str] = mapped_column(Text, default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -556,5 +561,31 @@ class InboxAlertConfig(Base):
     # que se avise. Por debajo de esto no se molesta a nadie: el bot suele
     # estar contestando.
     quiet_minutes: Mapped[int] = mapped_column(Integer, default=10)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class QuickReply(Base):
+    """Respuestas guardadas para no escribir lo mismo veinte veces al dia.
+
+    ("los precios", "como llegar", "horarios"). El atajo es lo que se
+    teclea en la bandeja para insertarlas; el texto es lo que sale.
+
+    Viven en Connect y no en cada app a proposito: la bandeja es una sola
+    y construir esto dos veces es justo lo que vuelve imposible escalar.
+    """
+
+    __tablename__ = "quick_replies"
+    __table_args__ = (
+        UniqueConstraint("app_id", "business_id", "shortcut", name="uq_quick_reply_shortcut"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    app_id: Mapped[str] = mapped_column(String(64))
+    business_id: Mapped[str] = mapped_column(String(64), default="")
+    # Sin la barra: se escribe "/precios" y se guarda "precios".
+    shortcut: Mapped[str] = mapped_column(String(64))
+    title: Mapped[str] = mapped_column(String(128), default="")
+    text: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
