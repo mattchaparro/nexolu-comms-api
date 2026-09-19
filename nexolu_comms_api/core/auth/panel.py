@@ -52,12 +52,35 @@ class PanelIdentity:
 
 @dataclass(frozen=True)
 class PanelScope:
-    """app_ids=None -> acceso total; lista -> solo esas apps."""
+    """app_ids=None -> acceso total; lista -> solo esas apps.
+
+    `business_ids` recorta un escalon mas adentro y existe por el chat
+    embebido: el panel del Spa muestra la bandeja de Connect dentro de su
+    propia pantalla, y ahi quien mira no es "el que administra la app
+    spa" sino UN salon. Sin este segundo filtro, embeber la bandeja en
+    Luxury Nails le mostraria las conversaciones de todos los spas del
+    sistema.
+
+    None = sin restriccion de negocio (el panel de Nexolu, que si los ve
+    todos). Una lista = solo esos, y la lista vacia no ve nada -- fallar
+    cerrado, igual que con las apps.
+    """
 
     app_ids: tuple[str, ...] | None
+    business_ids: tuple[str, ...] | None = None
 
     def allows(self, app_id: str) -> bool:
         return self.app_ids is None or app_id in self.app_ids
+
+    def allows_business(self, business_id: str | None) -> bool:
+        if self.business_ids is None:
+            return True
+        # Un contacto sin negocio no pertenece a ninguno, asi que no se le
+        # muestra a quien solo puede ver el suyo.
+        return business_id is not None and business_id in self.business_ids
+
+    def allows_contact(self, app_id: str, business_id: str | None) -> bool:
+        return self.allows(app_id) and self.allows_business(business_id)
 
 
 UNRESTRICTED_SCOPE = PanelScope(app_ids=None)
@@ -130,6 +153,31 @@ async def resolve_identity_by_email(session: AsyncSession, email: str) -> PanelI
     return identity_for_user(user)
 
 
+def embed_scope_from_token(token: str) -> PanelScope | None:
+    """Token de bandeja embebida -> alcance de UN negocio dentro de UNA app.
+
+    Devuelve None si el token no es de este tipo, para que quien llama
+    siga probando las otras puertas. No toca la BD a proposito: lo que
+    autoriza no es quien es una persona sino que el Spa -- ya autenticado
+    con su API key cuando pidio este token -- dijo que ese negocio puede
+    ver su propia bandeja.
+    """
+    try:
+        claims = decode_panel_token(token)
+    except InvalidPanelTokenError:
+        return None
+
+    if claims.get("typ") != "embed":
+        return None
+
+    app_id = str(claims.get("app") or "")
+    business_id = str(claims.get("biz") or "")
+    if not app_id or not business_id:
+        return None
+
+    return PanelScope(app_ids=(app_id,), business_ids=(business_id,))
+
+
 async def resolve_identity_by_token(session: AsyncSession, token: str) -> PanelIdentity | None:
     """JWT de panel -> identidad vigente. Se resuelve contra la BD en cada
     request (no contra los claims): desactivar un usuario o quitarle una
@@ -137,6 +185,13 @@ async def resolve_identity_by_token(session: AsyncSession, token: str) -> PanelI
     try:
         claims = decode_panel_token(token)
     except InvalidPanelTokenError:
+        return None
+
+    # Un token de bandeja embebida NO es una sesion de panel. Entra por el
+    # mismo header, asi que se rechaza aqui explicitamente: si algun dia
+    # existiera un usuario cuyo email coincidiera con su `sub`, heredaria
+    # el alcance de esa persona sin que nadie lo notara.
+    if claims.get("typ") == "embed":
         return None
 
     email = str(claims.get("sub") or "")

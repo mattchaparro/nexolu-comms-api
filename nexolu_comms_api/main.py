@@ -24,6 +24,7 @@ from nexolu_comms_api.api.v1 import (
     admin_users,
     admin_webhooks,
     catalog,
+    embed,
     flows,
     health,
     instagram,
@@ -114,6 +115,7 @@ def create_app() -> FastAPI:
     app.include_router(admin_quick_replies.router)
     app.include_router(flows.router)
     app.include_router(catalog.router)
+    app.include_router(embed.router)
 
     # La multimedia subida desde el panel, servida publica: Meta descarga
     # las imagenes de los flujos desde aca (ver api/v1/admin_media.py).

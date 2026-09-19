@@ -43,6 +43,33 @@ def create_panel_token(email: str) -> str:
     return jwt.encode(payload, settings.panel_jwt_secret, algorithm=_ALGORITHM)
 
 
+def create_embed_token(app_id: str, business_id: str, ttl_minutes: int) -> str:
+    """Token para la bandeja EMBEBIDA en el panel de otra app.
+
+    No es una sesion de panel y por eso lleva `typ`: el sujeto no es una
+    persona con email sino un negocio concreto dentro de una app, y lo
+    unico que puede hacer es mirar y contestar SUS conversaciones. Si un
+    token de estos se colara por la puerta del panel normal, su portador
+    heredaria el alcance de un administrador; el `typ` es lo que hace que
+    esa confusion no pueda ocurrir en silencio.
+
+    Vida corta a proposito: viaja en la URL de un iframe, que es el peor
+    sitio donde puede estar un token -- queda en el historial del
+    navegador y en el `Referer`. El panel que lo embebe lo renueva.
+    """
+    settings = get_settings()
+    now = datetime.now(UTC)
+    payload = {
+        "typ": "embed",
+        "sub": f"{app_id}:{business_id}",
+        "app": app_id,
+        "biz": business_id,
+        "iat": now,
+        "exp": now + timedelta(minutes=ttl_minutes),
+    }
+    return jwt.encode(payload, settings.panel_jwt_secret, algorithm=_ALGORITHM)
+
+
 def decode_panel_token(token: str) -> dict[str, Any]:
     settings = get_settings()
     if not settings.panel_jwt_secret:

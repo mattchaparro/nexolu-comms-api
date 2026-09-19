@@ -23,6 +23,7 @@ from nexolu_comms_api.core.auth.apps import AppIdentity, resolve_by_api_key
 from nexolu_comms_api.core.auth.panel import (
     UNRESTRICTED_SCOPE,
     PanelScope,
+    embed_scope_from_token,
     resolve_identity_by_token,
 )
 from nexolu_comms_api.core.db.session import get_session
@@ -106,6 +107,14 @@ async def get_panel_scope(
 
     if _is_platform_key(credential):
         return UNRESTRICTED_SCOPE
+
+    # La bandeja embebida en el panel de otra app: no es una persona, es
+    # UN negocio dentro de UNA app mirando lo suyo. Se prueba antes que la
+    # sesion de panel porque llega por el mismo header, y devuelve el
+    # alcance mas estrecho que existe aca.
+    embed = embed_scope_from_token(credential)
+    if embed is not None:
+        return embed
 
     identity = await resolve_identity_by_token(session, credential)
     if identity is None:

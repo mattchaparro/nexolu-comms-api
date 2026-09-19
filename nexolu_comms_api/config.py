@@ -155,6 +155,14 @@ class Settings(BaseSettings):
     # Origenes permitidos para CORS del panel (coma-separados). Vacio = sin
     # CORS - las apps server-side no lo necesitan, solo el navegador del panel.
     panel_cors_origins: str = ""
+    # Donde vive el panel (https://connect.nexolu.co). La usa el chat
+    # embebido: la app duena pide un token y recibe tambien la URL que
+    # tiene que meter en el iframe, para que cambiar la ruta del panel no
+    # obligue a desplegar las demas apps.
+    panel_base_url: str = ""
+    # Quien puede embeber el panel en un iframe NO se configura aca: el
+    # panel lo sirve nginx, no esta API, asi que la cabecera
+    # `frame-ancestors` vive en nexolu-comms-front/deploy/nginx/.
 
     # SSO con nexolu-auth (auth.nexolu.co) - ver core/auth/sso.py. La llave
     # publica va fijada aca ({kid: PEM en base64}), nunca se hace fetch:

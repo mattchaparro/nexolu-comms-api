@@ -208,7 +208,7 @@ async def list_conversations(
     seen: set[str] = set()
 
     for message, contact in rows:
-        if not scope.allows(contact.app_id):
+        if not scope.allows_contact(contact.app_id, contact.business_id):
             continue
         if app_id and contact.app_id != app_id:
             continue
@@ -394,8 +394,12 @@ async def _contact_in_scope(
     session: AsyncSession, contact_id: str, scope: PanelScope
 ) -> Contact:
     contact = await session.get(Contact, contact_id)
-    if contact is None or not scope.allows(contact.app_id):
+    if contact is None or not scope.allows_contact(contact.app_id, contact.business_id):
         # 404 tambien para lo ajeno: no filtrar existencia entre clientes.
+        # Y por NEGOCIO ademas de por app, porque la bandeja embebida en
+        # el panel de un salon la mira ese salon, no el dueno de la app:
+        # sin esto, un id de contacto adivinado abriria la conversacion
+        # de otro negocio.
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversacion no encontrada.")
     return contact
 
