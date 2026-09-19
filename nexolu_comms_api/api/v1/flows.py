@@ -80,3 +80,74 @@ async def trigger_flow(
         contact_name=payload.contact_name,
     )
     return TriggerFlowOut(session_id=flow_session.id, status=flow_session.status)
+
+
+class UpsertFlowIn(BaseModel):
+    """Un flujo publicado por la APP duena, no por una persona en el panel.
+
+    Existe para los flujos que se GENERAN: el menu de servicios del spa
+    sale de su catalogo, y mantenerlo a mano es garantizar que un dia el
+    menu ofrezca algo que ya no se presta. La app lo regenera y lo sube;
+    el panel sigue sirviendo para los que alguien arma a mano.
+    """
+
+    business_id: str | None = None
+    trigger_type: str = Field(default="keyword", pattern="^(keyword|api)$")
+    trigger_keywords: list[str] = Field(default_factory=list)
+    definition: dict[str, Any]
+    is_active: bool = True
+
+
+class UpsertFlowOut(BaseModel):
+    id: str
+    name: str
+    created: bool
+
+
+@router.put("/{name}", response_model=UpsertFlowOut)
+async def upsert_flow(
+    name: str,
+    payload: UpsertFlowIn,
+    app: AppIdentity = Depends(get_current_app),
+    session: AsyncSession = Depends(get_session),
+) -> UpsertFlowOut:
+    """Upsert por (app, negocio, nombre): regenerar el menu no crea un
+    flujo nuevo cada vez ni deja dos con el mismo nombre."""
+    from nexolu_comms_api.core.flows.engine import FlowDefinitionError, validate_definition
+
+    try:
+        validate_definition(payload.definition)
+    except FlowDefinitionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
+
+    if payload.trigger_type == "keyword" and not payload.trigger_keywords:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Un flujo con disparador 'keyword' necesita al menos una palabra clave.",
+        )
+
+    business_id = payload.business_id or ""
+    flow = (
+        await session.execute(
+            select(Flow).where(
+                Flow.app_id == app.app_id,
+                Flow.business_id == business_id,
+                Flow.name == name,
+            )
+        )
+    ).scalars().first()
+
+    created = flow is None
+    if flow is None:
+        flow = Flow(app_id=app.app_id, business_id=business_id, name=name)
+        session.add(flow)
+
+    flow.trigger_type = payload.trigger_type
+    flow.trigger_keywords = payload.trigger_keywords
+    flow.definition = payload.definition
+    flow.is_active = payload.is_active
+    await session.commit()
+
+    return UpsertFlowOut(id=flow.id, name=flow.name, created=created)
