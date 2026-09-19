@@ -686,6 +686,20 @@ class ContactRepository:
     async def get_or_create(
         self, app_id: str, business_id: str, phone: str, name: str = ""
     ) -> Contact:
+        """UNA persona, UN hilo.
+
+        La identidad de un contacto es (app, negocio, telefono), pero el
+        negocio no siempre se sabe: el webhook del numero compartido llega
+        sin el ("") y la app si lo declara al enviar ("1"). Buscar solo por
+        la terna exacta partia la conversacion en dos contactos -- lo que
+        escribio la clienta en uno y lo que le respondimos en el otro -- y
+        la bandeja quedaba ilegible justo cuando hay que atender.
+
+        Por eso: terna exacta primero y, si no, el mismo telefono en la
+        app (el mas recientemente tocado). El '+' se normaliza porque Meta
+        nunca lo usa y las apps a veces si.
+        """
+        phone = phone.lstrip("+")
         contact = (
             await self._session.execute(
                 select(Contact).where(
@@ -695,6 +709,20 @@ class ContactRepository:
                 )
             )
         ).scalar_one_or_none()
+
+        if contact is None:
+            contact = (
+                await self._session.execute(
+                    select(Contact)
+                    .where(Contact.app_id == app_id, Contact.phone == phone)
+                    .order_by(Contact.updated_at.desc())
+                )
+            ).scalars().first()
+            # El negocio que declara la app gana sobre el "" del numero
+            # compartido: es informacion que el webhook no tenia.
+            if contact is not None and business_id and not contact.business_id:
+                contact.business_id = business_id
+
         if contact is None:
             contact = Contact(app_id=app_id, business_id=business_id, phone=phone, name=name)
             self._session.add(contact)

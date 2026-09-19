@@ -5,17 +5,15 @@ el panel (`panel`) y la API de las apps (`api` - p.ej. el bot del spa
 respondiendo via /v1/notifications/send). Todos pasan por aca para que la
 burbuja se pinte igual venga de donde venga.
 
-La identidad del contacto es (app, negocio, telefono), pero un mismo
-telefono puede aparecer con negocios distintos segun quien escribio
-primero (el webhook del numero compartido no sabe el negocio; la app si).
-`resolve_contact_for_send` tolera eso: antes de crear un contacto nuevo
-busca el telefono en la app, para que el hilo no se parta en dos.
+Quien es "esta persona" lo decide UNA sola regla, la del motor
+(`ContactRepository.get_or_create`): el webhook del numero compartido no
+sabe el negocio y la app si, asi que buscar solo por la terna exacta
+partia la conversacion en dos contactos.
 """
 from __future__ import annotations
 
 from typing import Any
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexolu_comms_api.core.channels.base import ChannelSendResult, OutboundMessage
@@ -112,35 +110,12 @@ async def resolve_contact_for_send(
 ) -> Contact:
     """El contacto al que se le esta escribiendo, sin partir el hilo.
 
-    Meta no usa '+' y el motor tampoco; una app que mande '+57...' debe
-    caer en el mismo contacto que el webhook creo como '57...'.
+    Misma regla que usa el motor al recibir (ContactRepository): una sola
+    definicion de "quien es esta persona", porque tener dos fue exactamente
+    lo que dejo la conversacion partida en dos contactos.
     """
-    phone = phone.lstrip("+")
-    exact = (
-        await session.execute(
-            select(Contact).where(
-                Contact.app_id == app_id,
-                Contact.business_id == business_id,
-                Contact.phone == phone,
-            )
-        )
-    ).scalar_one_or_none()
-    if exact is not None:
-        return exact
+    from nexolu_comms_api.core.flows.engine import ContactRepository
 
-    # Mismo telefono con otro negocio (o sin negocio): es la misma persona
-    # y el mismo hilo - el mas recientemente tocado gana.
-    same_phone = (
-        await session.execute(
-            select(Contact)
-            .where(Contact.app_id == app_id, Contact.phone == phone)
-            .order_by(Contact.updated_at.desc())
-        )
-    ).scalars().first()
-    if same_phone is not None:
-        return same_phone
-
-    contact = Contact(app_id=app_id, business_id=business_id, phone=phone)
-    session.add(contact)
+    contact = await ContactRepository(session).get_or_create(app_id, business_id, phone)
     await session.flush()
     return contact

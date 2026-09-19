@@ -152,6 +152,39 @@ def test_app_triggered_flow_advances_when_the_reply_comes_without_business(
     ]
 
 
+def test_writing_first_and_the_reply_later_are_ONE_thread(
+    client, platform_headers, auth_headers, httpx_mock
+):
+    """El caso que partió el hilo en producción: la app escribe primero
+    (con negocio declarado) y la persona responde después por el webhook
+    (sin negocio). Si cada lado crea su contacto, la bandeja muestra lo que
+    respondimos en un hilo y lo que preguntó la clienta en otro."""
+    httpx_mock.add_response(url=MESSAGES_URL, json={"messages": [{"id": "wamid.first"}]})
+    primero = client.post(
+        "/v1/notifications/send",
+        headers=auth_headers,
+        json={
+            "channels": ["whatsapp"],
+            "to": {"whatsapp": "573001112233"},
+            "business_id": "1",
+            "whatsapp_template": {"name": "hello_world", "language": "en_US"},
+        },
+    )
+    assert primero.status_code == 200, primero.text
+
+    httpx_mock.add_response(url=CALLBACK_URL, json={"ok": True})
+    assert _signed_inbound(client, _text("573001112233", "Hola, ¿qué precios manejan?")).status_code == 200
+
+    conversations = client.get("/v1/admin/chats", headers=platform_headers).json()["items"]
+    assert len(conversations) == 1, "el hilo se partió en dos contactos"
+    thread = client.get(
+        f"/v1/admin/chats/{conversations[0]['contact_id']}/messages", headers=platform_headers
+    ).json()
+    assert [m["direction"] for m in thread] == ["out", "in"]
+    # Y el negocio que declaró la app queda pegado al contacto.
+    assert conversations[0]["business_id"] == "1"
+
+
 def test_api_sends_land_in_the_same_thread_as_out_api(
     client, platform_headers, auth_headers, httpx_mock
 ):
