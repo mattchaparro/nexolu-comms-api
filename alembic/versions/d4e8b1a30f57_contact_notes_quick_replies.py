@@ -22,7 +22,12 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.add_column('contacts', sa.Column('notes', sa.Text(), nullable=False, server_default=''))
+    # MySQL no acepta DEFAULT en TEXT ("BLOB, TEXT... can't have a default
+    # value"), y SQLite si - por eso esto paso las pruebas y fallo en
+    # produccion. Se agrega nullable, se rellena y se cierra.
+    op.add_column('contacts', sa.Column('notes', sa.Text(), nullable=True))
+    op.execute("UPDATE contacts SET notes = '' WHERE notes IS NULL")
+    op.alter_column('contacts', 'notes', existing_type=sa.Text(), nullable=False)
     op.create_table(
         'quick_replies',
         sa.Column('id', sa.String(length=32), primary_key=True),
