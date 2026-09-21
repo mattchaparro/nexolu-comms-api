@@ -57,8 +57,15 @@ async def pending_conversations(
     now = now or datetime.utcnow()
     cutoff = now - timedelta(minutes=max(1, config.quiet_minutes))
 
+    # Una respuesta que Meta rechazó no es una respuesta. Si contara, la
+    # conversación quedaba como atendida y nadie recibía el aviso -- pasó
+    # con una clienta a la que el bot le "contestó" tres veces desde el
+    # número de prueba y no le llegó ninguna.
+    efectivos = ChatMessage.status != "failed"
+
     last = (
         select(ChatMessage.contact_id, func.max(ChatMessage.created_at).label("last_at"))
+        .where(efectivos)
         .group_by(ChatMessage.contact_id)
         .subquery()
     )
@@ -72,6 +79,7 @@ async def pending_conversations(
             )
             .join(Contact, Contact.id == ChatMessage.contact_id)
             .where(Contact.app_id == config.app_id)
+            .where(efectivos)
             .order_by(ChatMessage.created_at.desc())
             .limit(200)
         )

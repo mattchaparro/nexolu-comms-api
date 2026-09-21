@@ -61,6 +61,9 @@ class ConversationOut(BaseModel):
     last_at: datetime
     window_open: bool
     unread: bool
+    # La ultima respuesta no llego: Meta la rechazo. Para quien atiende es
+    # lo mismo que no haber contestado, y se pinta asi.
+    last_failed: bool = False
     assigned_to: str | None = None
     assigned_name: str | None = None
 
@@ -218,9 +221,11 @@ async def list_conversations(
 
         # No leido = entro algo despues de la ultima vez que alguien abrio
         # el hilo. Lo que sale del panel no cuenta: responder ES leer.
-        unread = message.direction == "in" and (
-            contact.last_read_at is None or contact.last_read_at < message.created_at
-        )
+        sin_ver = contact.last_read_at is None or contact.last_read_at < message.created_at
+        # Una respuesta que Meta rechazo no es una respuesta: la clienta
+        # sigue esperando, igual que si nadie hubiera escrito.
+        fallo = message.direction == "out" and message.status == "failed"
+        unread = (message.direction == "in" or fallo) and sin_ver
         if unread:
             unread_total += 1
 
@@ -245,6 +250,7 @@ async def list_conversations(
                 last_at=message.created_at,
                 window_open=bool(contact.last_inbound_at and contact.last_inbound_at > threshold),
                 unread=unread,
+                last_failed=fallo,
                 assigned_to=contact.assigned_to,
                 assigned_name=names.get(contact.assigned_to or ""),
             )

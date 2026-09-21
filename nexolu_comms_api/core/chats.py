@@ -89,6 +89,14 @@ def log_outbound_chat(
     result: ChannelSendResult,
     origin: str,
 ) -> ChatMessage:
+    payload = outbound_chat_payload(message)
+    # Por qué no salió, en palabras de Meta. Sin esto la bandeja muestra
+    # la respuesta del bot como si hubiera llegado: así pasó con una
+    # clienta que escribió tres veces al número de prueba y Meta rechazó
+    # las tres respuestas ("not in allowed list") sin que nadie se enterara.
+    if result.status == "failed" and result.error:
+        payload = {**payload, "error": result.error[:300]}
+
     row = ChatMessage(
         app_id=contact.app_id,
         business_id=contact.business_id,
@@ -96,7 +104,7 @@ def log_outbound_chat(
         direction="out",
         message_type=outbound_chat_type(message),
         body=outbound_chat_body(message),
-        payload=outbound_chat_payload(message),
+        payload=payload,
         wamid=result.provider_message_id,
         status=result.status,
         origin=origin,

@@ -226,3 +226,56 @@ def test_la_configuracion_ajena_no_se_ve_ni_se_toca(client, platform_headers):
     # La plataforma puede con todas; lo que se prueba acá es que el endpoint
     # exige scope (un cliente externo recibiría 404).
     assert ajena.status_code in (200, 404)
+
+
+def _respuesta_rechazada(client, auth_headers, httpx_mock, phone: str = "573001112233"):
+    """El bot contesta y Meta lo rechaza, como pasó con el número de prueba
+    ("#131030 Recipient phone number not in allowed list")."""
+    httpx_mock.add_response(
+        url=MESSAGES_URL,
+        status_code=400,
+        json={
+            "error": {
+                "message": "(#131030) Recipient phone number not in allowed list",
+                "type": "OAuthException",
+                "code": 131030,
+            }
+        },
+    )
+    return client.post(
+        "/v1/notifications/send",
+        headers=auth_headers,
+        json={"channels": ["whatsapp"], "to": {"whatsapp": phone}, "text": "¡Hola! ¿Qué día te sirve?"},
+    )
+
+
+def test_una_respuesta_que_no_llego_no_cuenta_como_contestada(
+    client, platform_headers, auth_headers, httpx_mock
+):
+    """Una clienta escribió tres veces al número de prueba. El bot le
+    "contestó" las tres y Meta rechazó las tres; como lo último en el hilo
+    era nuestro, nadie recibió el aviso y se quedó sin respuesta."""
+    _configure(client, platform_headers)
+    assert _inbound(client, httpx_mock, "Para agendar una cita porfavor").status_code == 200
+    assert _respuesta_rechazada(client, auth_headers, httpx_mock).status_code == 200
+
+    httpx_mock.add_response(url=BREVO_URL, json={"messageId": "<brevo-1>"})
+    assert _run_alerts() == 1
+
+
+def test_la_bandeja_la_muestra_pendiente_y_dice_por_que(
+    client, platform_headers, auth_headers, httpx_mock
+):
+    assert _inbound(client, httpx_mock, "Para agendar una cita porfavor").status_code == 200
+    _respuesta_rechazada(client, auth_headers, httpx_mock)
+
+    fila = client.get("/v1/admin/chats", headers=platform_headers).json()["items"][0]
+    assert fila["last_failed"] is True
+    # Pendiente: alguien tiene que hacer algo con esta conversación.
+    assert fila["unread"] is True
+
+    hilo = client.get(f"/v1/admin/chats/{fila['contact_id']}/messages", headers=platform_headers).json()
+    fallido = [m for m in hilo if m["direction"] == "out"][-1]
+    assert fallido["status"] == "failed"
+    # El motivo viaja con el mensaje para que el panel lo pueda explicar.
+    assert "131030" in fallido["payload"]["error"]
