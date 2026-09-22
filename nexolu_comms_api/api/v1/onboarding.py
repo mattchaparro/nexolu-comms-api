@@ -18,7 +18,7 @@ import logging
 import secrets
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -32,6 +32,7 @@ from nexolu_comms_api.core.channels.business_channels import (
 from nexolu_comms_api.core.db.entities import BusinessChannel
 from nexolu_comms_api.core.db.session import get_session
 from nexolu_comms_api.core.meta.graph import MetaGraphClient, MetaGraphError
+from nexolu_comms_api.core.whatsapp_flows.provisioning import autoprovision_for_channel
 
 router = APIRouter(prefix="/v1/onboarding/whatsapp", tags=["onboarding"])
 logger = logging.getLogger(__name__)
@@ -105,6 +106,7 @@ async def get_channel_status(
 @router.post("/complete", response_model=ChannelStatusOut)
 async def complete_signup(
     payload: CompleteSignupIn,
+    background: BackgroundTasks,
     app: AppIdentity = Depends(get_current_app),
     session: AsyncSession = Depends(get_session),
 ) -> ChannelStatusOut:
@@ -167,5 +169,10 @@ async def complete_signup(
         "onboarding.channel_connected",
         extra={"app_id": app.app_id, "business_id": payload.business_id, "channel_id": channel.id},
     )
+
+    # Los formularios que la app pidio tener listos en cada numero propio
+    # (WHATSAPP_FLOW_AUTOPROVISION): despues de responder, para que un Meta
+    # lento no demore el popup de Embedded Signup.
+    background.add_task(autoprovision_for_channel, app.app_id, payload.business_id)
 
     return _to_status(payload.business_id, channel)

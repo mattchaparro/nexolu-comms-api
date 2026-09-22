@@ -214,6 +214,25 @@ class Settings(BaseSettings):
     media_dir: str = "./media"
     media_base_url: str = ""
 
+    # Generacion de formularios de WhatsApp (WhatsApp Flows) con IA: pasa
+    # por nexolu-ia-core (POST /v1/completions), como cualquier otra app
+    # del ecosistema - el uso/costo queda registrado alla por negocio. En
+    # ia-core, Connect es una app mas (app_id "connect") con proveedor
+    # anthropic y modelo claude-opus-5: escribir un Flow JSON valido es
+    # trabajo del modelo mas capaz. Vacios = el boton "Generar con IA"
+    # responde 503 y el resto del modulo funciona igual.
+    ia_core_base_url: str = ""
+    ia_core_api_key: str = ""
+    # Largo a proposito: el modelo piensa antes de escribir el JSON.
+    ia_core_timeout_seconds: int = 180
+
+    # Auto-provision de formularios al conectar el numero propio de un
+    # negocio (Embedded Signup): {app_id: [claves de la biblioteca]}, p.ej.
+    # {"spa": ["confirm_booking"]}. Se crea, se publica y se le avisa el
+    # flow_id a la app duena con el evento `whatsapp_flow_provisioned`.
+    # Ver core/whatsapp_flows/provisioning.py.
+    whatsapp_flow_autoprovision: str = "{}"
+
     # Registro de apps cliente, como JSON crudo (parseado en `apps`).
     nexolu_apps_json: str = "{}"
 

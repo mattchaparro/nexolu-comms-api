@@ -1,5 +1,5 @@
 """Cliente minimo de Graph API: onboarding de numeros propios (Embedded
-Signup) y gestion de plantillas de mensaje. Solo las llamadas que los
+Signup), gestion de plantillas de mensaje y de WhatsApp Flows. Solo las llamadas que los
 flujos necesitan - ver el analisis
 (`nexolu-utils/docs/research/whatsapp-capacidad-transversal.md`, secciones
 F e I) con sus fuentes oficiales. El envio de mensajes NO pasa por aca
@@ -164,6 +164,100 @@ class MetaGraphClient:
             params={"name": name},
         )
 
+    # -- WhatsApp Flows ("Formularios" en el panel). Referencia oficial:
+    # developers.facebook.com/docs/whatsapp/flows/reference/flowsapi - mismo
+    # token y permiso que las plantillas (whatsapp_business_management).
+    # Ciclo: crear borrador -> subir flow.json (la respuesta trae los
+    # validation_errors) -> publicar. Un Flow publicado ya no se edita. ---
+
+    async def create_flow(
+        self, waba_id: str, access_token: str, *, name: str, categories: list[str]
+    ) -> str:
+        """POST /{waba_id}/flows (sin flow_json: el JSON se sube aparte como
+        asset, que es lo que devuelve los errores de validacion).
+        @return el flow_id del borrador."""
+        data = await self._request(
+            "POST",
+            f"/{waba_id}/flows",
+            token=access_token,
+            json={"name": name, "categories": categories},
+        )
+        flow_id = data.get("id")
+        if not flow_id:
+            raise MetaGraphError("Meta no devolvio el id del formulario creado.")
+        return str(flow_id)
+
+    async def upload_flow_json(
+        self, flow_id: str, access_token: str, flow_json: str
+    ) -> list[dict[str, Any]]:
+        """POST /{flow_id}/assets, multipart: file=flow.json,
+        name=flow.json, asset_type=FLOW_JSON. Solo sobre borradores.
+        @return los validation_errors de Meta (vacia = valido)."""
+        data = await self._request(
+            "POST",
+            f"/{flow_id}/assets",
+            token=access_token,
+            data={"name": "flow.json", "asset_type": "FLOW_JSON"},
+            files={"file": ("flow.json", flow_json.encode("utf-8"), "application/json")},
+        )
+        errors = data.get("validation_errors")
+        return errors if isinstance(errors, list) else []
+
+    async def get_flow(self, flow_id: str, access_token: str) -> dict[str, Any]:
+        """GET /{flow_id} con estado, errores y la URL de vista previa.
+        `preview.invalidate(false)` reusa el link vigente (vence a los 30
+        dias) en vez de invalidar el que el panel ya tenga abierto."""
+        return await self._request(
+            "GET",
+            f"/{flow_id}",
+            token=access_token,
+            params={
+                "fields": "id,name,status,categories,validation_errors,json_version,"
+                "preview.invalidate(false)",
+            },
+        )
+
+    async def list_flows(self, waba_id: str, access_token: str) -> list[dict[str, Any]]:
+        """Primera pagina, igual que las plantillas."""
+        data = await self._request(
+            "GET",
+            f"/{waba_id}/flows",
+            token=access_token,
+            params={"fields": "id,name,status,categories,validation_errors", "limit": "200"},
+        )
+        items = data.get("data")
+        return items if isinstance(items, list) else []
+
+    async def download_flow_json(self, flow_id: str, access_token: str) -> dict[str, Any] | None:
+        """El JSON de un Flow creado por fuera del panel: GET
+        /{flow_id}/assets trae un `download_url` firmado del FLOW_JSON.
+        @return el JSON, o None si no hay asset o no se pudo leer."""
+        data = await self._request("GET", f"/{flow_id}/assets", token=access_token)
+        for asset in data.get("data") or []:
+            if asset.get("asset_type") == "FLOW_JSON" and asset.get("download_url"):
+                try:
+                    async with httpx.AsyncClient(
+                        timeout=self._settings.http_timeout_seconds
+                    ) as client:
+                        response = await client.get(asset["download_url"])
+                    response.raise_for_status()
+                    body = response.json()
+                except (httpx.HTTPError, ValueError):
+                    logger.warning("meta_graph.flow_json_unreadable", extra={"flow_id": flow_id})
+                    return None
+                return body if isinstance(body, dict) else None
+        return None
+
+    async def publish_flow(self, flow_id: str, access_token: str) -> None:
+        await self._request("POST", f"/{flow_id}/publish", token=access_token)
+
+    async def deprecate_flow(self, flow_id: str, access_token: str) -> None:
+        await self._request("POST", f"/{flow_id}/deprecate", token=access_token)
+
+    async def delete_flow(self, flow_id: str, access_token: str) -> None:
+        """Solo borradores (regla de Meta): uno publicado se depreca."""
+        await self._request("DELETE", f"/{flow_id}", token=access_token)
+
     async def _request(
         self,
         method: str,
@@ -172,13 +266,17 @@ class MetaGraphClient:
         token: str | None = None,
         params: dict[str, str] | None = None,
         json: dict[str, Any] | None = None,
+        data: dict[str, str] | None = None,
+        files: dict[str, tuple[str, bytes, str]] | None = None,
     ) -> dict[str, Any]:
         url = f"{self._settings.whatsapp_api_base_url}{path}"
         headers = {"Authorization": f"Bearer {token}"} if token else {}
 
         try:
             async with httpx.AsyncClient(timeout=self._settings.http_timeout_seconds) as client:
-                response = await client.request(method, url, params=params, json=json, headers=headers)
+                response = await client.request(
+                    method, url, params=params, json=json, data=data, files=files, headers=headers
+                )
         except httpx.HTTPError as exc:
             raise MetaGraphError(f"No se pudo contactar a Graph API: {exc}") from exc
 

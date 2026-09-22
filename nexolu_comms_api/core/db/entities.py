@@ -294,6 +294,67 @@ class WhatsAppTemplate(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class WhatsAppFlow(Base):
+    """Espejo local de UN WhatsApp Flow de Meta (en el panel: "Formulario").
+
+    OJO con el nombre: NO es un `Flow` de este servicio (el motor tipo
+    ManyChat de core/flows/engine.py). Este es el formulario nativo de
+    WhatsApp que Meta pinta dentro del chat; en codigo se llama como Meta lo
+    llama y en el panel "Formulario" para no confundirlos.
+
+    Mismo reparto que las plantillas: Meta es la fuente de verdad del ESTADO
+    (DRAFT -> PUBLISHED -> DEPRECATED, mas BLOCKED/THROTTLED si tuviera
+    endpoint) y de la validacion; aca se guarda el JSON que se subio (Meta
+    no lo devuelve en el listado - hay que descargarlo del asset) y los
+    ultimos `validation_errors`, para que el panel liste y edite sin pegarle
+    a Graph API en cada carga.
+
+    Un Flow PUBLICADO ya no se puede editar (regla de Meta): cambiarlo es
+    crear otro borrador. Por eso el `json` de una fila publicada es historia,
+    no un borrador en curso.
+
+    `business_channel_id`: NULL = Flow de la WABA compartida de la app; con
+    valor = de la WABA propia de ese negocio (Embedded Signup), igual que
+    `WhatsAppTemplate`.
+    """
+
+    __tablename__ = "whatsapp_flows"
+    __table_args__ = (
+        UniqueConstraint("waba_id", "name", name="uq_whatsapp_flow_identity"),
+        Index("ix_whatsapp_flows_app", "app_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    app_id: Mapped[str] = mapped_column(String(64))
+    business_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    business_channel_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    waba_id: Mapped[str] = mapped_column(String(64))
+    meta_flow_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    name: Mapped[str] = mapped_column(String(191))
+    categories: Mapped[list[str]] = mapped_column(JSON, default=list)
+    # DRAFT | PUBLISHED | DEPRECATED | BLOCKED | THROTTLED - lo que Meta
+    # diga, sin lista cerrada (igual que las plantillas).
+    status: Mapped[str] = mapped_column(String(32), default="DRAFT")
+    # El Flow JSON TAL COMO se subio a Meta, como texto y no como columna
+    # JSON: MySQL reordena las claves de un JSON, y entonces el editor
+    # mostraria el formulario desordenado y la linea de un validation_error
+    # de Meta ya no apuntaria a nada. NULL si se sincronizo sin poder
+    # descargar el asset.
+    flow_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # "version" del Flow JSON ("7.2"): define que componentes valen.
+    json_version: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    validation_errors: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    preview_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    preview_expires_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    # Clave de la plantilla de la biblioteca de la que salio (p.ej.
+    # "confirm_booking"), para no duplicarla al auto-provisionar.
+    library_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_synced_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class Contact(Base):
     """Un contacto de WhatsApp de un negocio, con tags y campos libres - el
     modelo subscriber/tags/custom-fields de ManyChat, que es lo que permite
