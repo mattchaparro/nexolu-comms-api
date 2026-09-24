@@ -22,6 +22,9 @@ dependencies = [
     # Validador local del Flow JSON de los formularios de WhatsApp, antes
     # de gastar una llamada a Meta. Ver core/whatsapp_flows/validator.py.
     "jsonschema>=4.23",
+    # Notificaciones Web Push al celular de quien atiende el chat (VAPID).
+    # Ver core/push.py.
+    "pywebpush>=2.0",
 ]
 
 [project.optional-dependencies]

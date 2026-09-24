@@ -19,7 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexolu_comms_api.core.alerts import compose, pending_conversations
-from nexolu_comms_api.core.auth.dependencies import get_panel_scope, require_scope_for_app
+from nexolu_comms_api.core.auth.dependencies import get_chat_scope
 from nexolu_comms_api.core.auth.panel import PanelScope
 from nexolu_comms_api.core.db.entities import InboxAlertConfig
 from nexolu_comms_api.core.db.session import get_session
@@ -73,22 +73,23 @@ def _to_out(row: InboxAlertConfig) -> AlertConfigOut:
 
 @router.get("", response_model=list[AlertConfigOut])
 async def list_configs(
-    scope: PanelScope = Depends(get_panel_scope),
+    scope: PanelScope = Depends(get_chat_scope),
     session: AsyncSession = Depends(get_session),
 ) -> list[AlertConfigOut]:
     rows = (await session.execute(select(InboxAlertConfig))).scalars().all()
-    return [_to_out(r) for r in rows if scope.allows(r.app_id)]
+    return [_to_out(r) for r in rows if scope.allows_contact(r.app_id, r.business_id)]
 
 
 @router.put("", response_model=AlertConfigOut)
 async def upsert_config(
     payload: AlertConfigIn,
-    scope: PanelScope = Depends(get_panel_scope),
+    scope: PanelScope = Depends(get_chat_scope),
     session: AsyncSession = Depends(get_session),
 ) -> AlertConfigOut:
     """Upsert por (app, negocio): la configuracion es una sola por bandeja,
     no una lista de reglas que se pisan entre si."""
-    require_scope_for_app(scope, payload.app_id)
+    if not scope.allows_contact(payload.app_id, payload.business_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="App desconocida.")
 
     row = (
         await session.execute(
@@ -118,10 +119,11 @@ async def upsert_config(
 async def preview(
     app_id: str,
     business_id: str = "",
-    scope: PanelScope = Depends(get_panel_scope),
+    scope: PanelScope = Depends(get_chat_scope),
     session: AsyncSession = Depends(get_session),
 ) -> AlertPreviewOut:
-    require_scope_for_app(scope, app_id)
+    if not scope.allows_contact(app_id, business_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="App desconocida.")
 
     row = (
         await session.execute(

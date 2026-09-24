@@ -24,6 +24,7 @@ from nexolu_comms_api.api.v1 import (
     admin_users,
     admin_webhooks,
     admin_whatsapp_flows,
+    app_users,
     catalog,
     embed,
     flows,
@@ -31,6 +32,7 @@ from nexolu_comms_api.api.v1 import (
     instagram,
     notifications,
     onboarding,
+    push,
     usage,
     whatsapp,
 )
@@ -118,6 +120,8 @@ def create_app() -> FastAPI:
     app.include_router(flows.router)
     app.include_router(catalog.router)
     app.include_router(embed.router)
+    app.include_router(app_users.router)
+    app.include_router(push.router)
 
     # La multimedia subida desde el panel, servida publica: Meta descarga
     # las imagenes de los flujos desde aca (ver api/v1/admin_media.py).

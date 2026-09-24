@@ -22,6 +22,7 @@ from nexolu_comms_api.config import get_settings
 from nexolu_comms_api.core.auth.apps import AppIdentity, resolve_by_api_key
 from nexolu_comms_api.core.auth.panel import (
     UNRESTRICTED_SCOPE,
+    PanelIdentity,
     PanelScope,
     embed_scope_from_token,
     resolve_identity_by_token,
@@ -88,17 +89,19 @@ async def require_platform_access(
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="API key de plataforma invalida.")
 
 
-async def get_panel_scope(
+async def get_chat_scope(
     authorization: str | None = Header(default=None),
     session: AsyncSession = Depends(get_session),
 ) -> PanelScope:
-    """Alcance del que llama, para los endpoints que ADMITEN clientes
-    externos (apps propias, credenciales, webhooks, canales, uso).
+    """Alcance del que llama, para lo que hace falta para ATENDER el chat
+    (la bandeja, respuestas rapidas, plantillas para enviar, adjuntos).
 
     - platform key o usuario `platform` -> sin restriccion (app_ids=None).
-    - usuario `client` -> solo las apps de sus membresias. La lista puede
-      estar vacia (usuario recien creado sin membresias): eso es "no ve
-      nada", no "ve todo" - fallar cerrado.
+    - usuario `client` -> solo las apps de sus membresias, y si alguna es
+      de un negocio, solo ese negocio. La lista puede estar vacia (usuario
+      recien creado sin membresias): eso es "no ve nada", no "ve todo" -
+      fallar cerrado.
+    - token de bandeja embebida -> UN negocio de UNA app.
 
     El filtro se aplica SIEMPRE del lado del servidor con `PanelScope`:
     que el front pida otra app no importa, la respuesta viene recortada.
@@ -119,10 +122,38 @@ async def get_panel_scope(
     identity = await resolve_identity_by_token(session, credential)
     if identity is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sesion invalida o expirada.")
+    return identity.scope
 
-    if identity.is_platform:
-        return UNRESTRICTED_SCOPE
-    return PanelScope(app_ids=identity.app_ids)
+
+async def get_panel_scope(
+    scope: PanelScope = Depends(get_chat_scope),
+) -> PanelScope:
+    """Alcance para ADMINISTRAR una app (flujos, plantillas, canales,
+    credenciales, webhooks, uso): igual que `get_chat_scope`, pero quien
+    solo ve UN negocio no entra.
+
+    Esas tablas son de la app entera -- los flujos del Spa son los de
+    todos los salones -- y recortarlas por negocio no tiene sentido; la
+    recepcionista de un salon (o la bandeja embebida) vino a contestar
+    mensajes, no a editar el bot de todos. 404 y no 403, como el resto
+    del scoping: no se confirma que exista lo que no puede ver.
+    """
+    if scope.is_business_restricted:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No encontrado.")
+    return scope
+
+
+async def get_panel_identity(
+    authorization: str | None = Header(default=None),
+    session: AsyncSession = Depends(get_session),
+) -> PanelIdentity:
+    """Una PERSONA del panel (no la platform key ni la bandeja embebida):
+    para lo que es de alguien, como los avisos a su celular."""
+    credential = _bearer_credential(authorization)
+    identity = await resolve_identity_by_token(session, credential)
+    if identity is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sesion invalida o expirada.")
+    return identity
 
 
 def require_scope_for_app(scope: PanelScope, app_id: str) -> None:

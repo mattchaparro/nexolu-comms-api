@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexolu_comms_api.core.auth.dependencies import (
-    get_panel_scope,
+    get_chat_scope,
     require_platform_access,
 )
 from nexolu_comms_api.core.auth.panel import PanelScope
@@ -66,7 +66,8 @@ async def _get_or_404(repo: CommsAppRepository, app_id: str) -> CommsApp:
 
 @router.get("", response_model=list[CommsAppOut])
 async def list_apps(
-    scope: PanelScope = Depends(get_panel_scope),
+    # El chat lo usa para nombrar las apps; quien solo ve un salon ve su app.
+    scope: PanelScope = Depends(get_chat_scope),
     session: AsyncSession = Depends(get_session),
 ) -> list[CommsAppOut]:
     apps = await CommsAppRepository(session).list_all()

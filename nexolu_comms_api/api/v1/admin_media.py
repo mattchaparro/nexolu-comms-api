@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, stat
 from pydantic import BaseModel
 
 from nexolu_comms_api.config import get_settings
-from nexolu_comms_api.core.auth.dependencies import get_panel_scope
+from nexolu_comms_api.core.auth.dependencies import get_chat_scope
 from nexolu_comms_api.core.auth.panel import PanelScope
 
 router = APIRouter(prefix="/v1/admin/media", tags=["admin-media"])
@@ -44,7 +44,7 @@ class MediaOut(BaseModel):
 async def upload_media(
     request: Request,
     file: UploadFile,
-    _scope: PanelScope = Depends(get_panel_scope),
+    _scope: PanelScope = Depends(get_chat_scope),
 ) -> MediaOut:
     extension = Path(file.filename or "").suffix.lower()
     if extension not in ALLOWED_EXTENSIONS:

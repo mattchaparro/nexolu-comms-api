@@ -44,10 +44,21 @@ class PanelIdentity:
     # vacia (su acceso no se expresa como lista, es total).
     app_ids: tuple[str, ...] = ()
     user_id: str | None = None  # None = operador de emergencia (env)
+    # None = ve todos los negocios de sus apps. Una tupla = solo esos: la
+    # recepcionista de un salon que entro desde el Spa (ver PanelMembership).
+    business_ids: tuple[str, ...] | None = None
+    # La app de donde viene (usuarios que entran con pase, ver PanelUser).
+    origin_app_id: str | None = None
 
     @property
     def is_platform(self) -> bool:
         return self.role == ROLE_PLATFORM
+
+    @property
+    def scope(self) -> PanelScope:
+        if self.is_platform:
+            return UNRESTRICTED_SCOPE
+        return PanelScope(app_ids=self.app_ids, business_ids=self.business_ids)
 
 
 @dataclass(frozen=True)
@@ -81,6 +92,18 @@ class PanelScope:
 
     def allows_contact(self, app_id: str, business_id: str | None) -> bool:
         return self.allows(app_id) and self.allows_business(business_id)
+
+    @property
+    def is_business_restricted(self) -> bool:
+        return self.business_ids is not None
+
+    def allows_shared(self, app_id: str, business_id: str | None) -> bool:
+        """Para cosas que pueden ser de toda la app o de un negocio
+        (respuestas rapidas, avisos): lo de toda la app ("") lo ve
+        cualquiera con la app; lo de un negocio, solo quien ve ese negocio."""
+        if not self.allows(app_id):
+            return False
+        return not business_id or self.allows_business(business_id)
 
 
 UNRESTRICTED_SCOPE = PanelScope(app_ids=None)
@@ -117,12 +140,18 @@ class PanelUserRepository:
 
 
 def identity_for_user(user: PanelUser) -> PanelIdentity:
+    # Si CUALQUIER membresia es de un negocio, el recorte por negocio
+    # aplica a todas: mezclar "toda la app X" con "solo el salon Y de la
+    # app Z" no cabe en un PanelScope, y ante la duda se falla cerrado.
+    business_ids = tuple(m.business_id for m in user.memberships if m.business_id)
     return PanelIdentity(
         email=user.email,
         full_name=user.full_name or user.email,
         role=user.role,
         app_ids=tuple(m.app_id for m in user.memberships),
         user_id=user.id,
+        business_ids=business_ids or None,
+        origin_app_id=user.origin_app_id,
     )
 
 
@@ -178,6 +207,19 @@ def embed_scope_from_token(token: str) -> PanelScope | None:
     return PanelScope(app_ids=(app_id,), business_ids=(business_id,))
 
 
+async def identity_by_email(session: AsyncSession, email: str) -> PanelIdentity | None:
+    """Identidad vigente de un email ya autenticado, SIN efectos (no toca
+    last_login_at): para decidir a quien le llega un push."""
+    settings = get_settings()
+    if settings.panel_email and email.strip().lower() == settings.panel_email.strip().lower():
+        return _emergency_identity()
+
+    user = await PanelUserRepository(session).get_by_email(email)
+    if user is None or not user.is_active:
+        return None
+    return identity_for_user(user)
+
+
 async def resolve_identity_by_token(session: AsyncSession, token: str) -> PanelIdentity | None:
     """JWT de panel -> identidad vigente. Se resuelve contra la BD en cada
     request (no contra los claims): desactivar un usuario o quitarle una
@@ -198,11 +240,4 @@ async def resolve_identity_by_token(session: AsyncSession, token: str) -> PanelI
     if not email:
         return None
 
-    settings = get_settings()
-    if settings.panel_email and email.strip().lower() == settings.panel_email.strip().lower():
-        return _emergency_identity()
-
-    user = await PanelUserRepository(session).get_by_email(email)
-    if user is None or not user.is_active:
-        return None
-    return identity_for_user(user)
+    return await identity_by_email(session, email)

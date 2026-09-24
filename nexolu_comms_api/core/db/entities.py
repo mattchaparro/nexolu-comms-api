@@ -174,6 +174,17 @@ class PanelUser(Base):
     password_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Usuario que viene de OTRA app (la recepcionista del Spa): no tiene
+    # contrasena ni SSO, entra solo con el pase de un solo uso que pide su
+    # app de servidor a servidor (api/v1/app_users.py). Su `email` es
+    # sintetico ({ref}@{app}.apps.connect) a proposito: la misma persona
+    # puede ser admin `platform` con su correo real, y el enlace del Spa
+    # NO debe entrarla como admin.
+    origin_app_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    origin_user_ref: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # El pase vigente, hasheado (sha256): sirve una vez y por segundos.
+    login_ticket_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    login_ticket_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -196,9 +207,38 @@ class PanelMembership(Base):
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
     user_id: Mapped[str] = mapped_column(ForeignKey("panel_users.id"), index=True)
     app_id: Mapped[str] = mapped_column(String(64))
+    # "" = toda la app (el cliente externo dueno de su CommsApp). Con valor
+    # = solo ESE negocio de la app: "la app spa" son todos los salones, y
+    # la recepcionista de uno no puede ver los chats de otro.
+    business_id: Mapped[str] = mapped_column(String(64), default="")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     user: Mapped[PanelUser] = relationship(back_populates="memberships")
+
+
+class PushSubscription(Base):
+    """Un navegador (casi siempre un celular) que pidio que le avisen
+    cuando alguien escribe. Es de una PERSONA del panel -- `user_email` es
+    el mismo `sub` de su sesion -- y a quien se le manda se decide al
+    momento de enviar con su alcance vigente (core/push.py): quitarle un
+    negocio a alguien le corta los avisos de ese negocio sin tocar esta
+    tabla.
+
+    `endpoint` es unico: el navegador lo da por suscripcion, y si otra
+    persona entra en el mismo celular, la fila pasa a ser de ella."""
+
+    __tablename__ = "push_subscriptions"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    user_email: Mapped[str] = mapped_column(String(191), index=True)
+    endpoint: Mapped[str] = mapped_column(String(512), unique=True)
+    p256dh: Mapped[str] = mapped_column(String(255))
+    auth: Mapped[str] = mapped_column(String(64))
+    content_encoding: Mapped[str] = mapped_column(String(16), default="aes128gcm")
+    user_agent: Mapped[str] = mapped_column(String(255), default="")
+    last_sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 class BusinessChannel(Base):

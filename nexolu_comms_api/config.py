@@ -160,6 +160,14 @@ class Settings(BaseSettings):
     # tiene que meter en el iframe, para que cambiar la ruta del panel no
     # obligue a desplegar las demas apps.
     panel_base_url: str = ""
+    # Web Push (core/push.py): el par VAPID con el que Connect firma las
+    # notificaciones al celular. Se genera UNA vez con
+    # `python scripts/generate_vapid.py` y no se rota a la ligera: cambiarlo
+    # invalida todas las suscripciones (cada navegador tendria que volver a
+    # activar). Vacio = push apagado, el resto del panel sigue igual.
+    vapid_public_key: str = ""
+    vapid_private_key: str = ""
+    vapid_subject: str = "mailto:soporte@nexolu.co"
     # Quien puede embeber el panel en un iframe NO se configura aca: el
     # panel lo sirve nginx, no esta API, asi que la cabecera
     # `frame-ancestors` vive en nexolu-comms-front/deploy/nginx/.

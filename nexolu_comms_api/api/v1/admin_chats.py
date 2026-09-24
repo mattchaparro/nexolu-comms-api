@@ -21,7 +21,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexolu_comms_api.core.auth.apps import resolve_by_app_id
-from nexolu_comms_api.core.auth.dependencies import get_panel_scope
+from nexolu_comms_api.core.auth.dependencies import get_chat_scope
 from nexolu_comms_api.core.auth.panel import PanelScope
 from nexolu_comms_api.core.channels.base import OutboundMessage
 from nexolu_comms_api.core.channels.business_channels import resolve_whatsapp_identity
@@ -168,7 +168,7 @@ async def list_conversations(
     only_unread: bool = False,
     limit: int = 50,
     offset: int = 0,
-    scope: PanelScope = Depends(get_panel_scope),
+    scope: PanelScope = Depends(get_chat_scope),
     session: AsyncSession = Depends(get_session),
 ) -> ConversationListOut:
     """La lista de la bandeja: una fila por contacto con su ultimo mensaje.
@@ -308,7 +308,7 @@ async def _contact_card(session: AsyncSession, contact: Contact) -> ContactCardO
 @router.get("/{contact_id}", response_model=ContactCardOut)
 async def contact_card(
     contact_id: str,
-    scope: PanelScope = Depends(get_panel_scope),
+    scope: PanelScope = Depends(get_chat_scope),
     session: AsyncSession = Depends(get_session),
 ) -> ContactCardOut:
     return await _contact_card(session, await _contact_in_scope(session, contact_id, scope))
@@ -318,7 +318,7 @@ async def contact_card(
 async def update_contact_card(
     contact_id: str,
     payload: ContactCardPatch,
-    scope: PanelScope = Depends(get_panel_scope),
+    scope: PanelScope = Depends(get_chat_scope),
     session: AsyncSession = Depends(get_session),
 ) -> ContactCardOut:
     contact = await _contact_in_scope(session, contact_id, scope)
@@ -339,7 +339,7 @@ async def update_contact_card(
 @router.post("/{contact_id}/read", status_code=status.HTTP_204_NO_CONTENT)
 async def mark_read(
     contact_id: str,
-    scope: PanelScope = Depends(get_panel_scope),
+    scope: PanelScope = Depends(get_chat_scope),
     session: AsyncSession = Depends(get_session),
 ) -> None:
     """Marca el hilo como leido hasta ahora. Lo llama el panel al abrirlo."""
@@ -352,7 +352,7 @@ async def mark_read(
 async def assign(
     contact_id: str,
     payload: AssignIn,
-    scope: PanelScope = Depends(get_panel_scope),
+    scope: PanelScope = Depends(get_chat_scope),
     session: AsyncSession = Depends(get_session),
 ) -> ConversationOut:
     """Quien se hace cargo del hilo. No bloquea a nadie (un candado en una
@@ -414,7 +414,7 @@ async def _contact_in_scope(
 async def list_messages(
     contact_id: str,
     limit: int = 100,
-    scope: PanelScope = Depends(get_panel_scope),
+    scope: PanelScope = Depends(get_chat_scope),
     session: AsyncSession = Depends(get_session),
 ) -> list[ChatMessageOut]:
     contact = await _contact_in_scope(session, contact_id, scope)
@@ -448,7 +448,7 @@ async def send_message(
     contact_id: str,
     payload: ChatSendIn,
     background_tasks: BackgroundTasks,
-    scope: PanelScope = Depends(get_panel_scope),
+    scope: PanelScope = Depends(get_chat_scope),
     session: AsyncSession = Depends(get_session),
 ) -> ChatMessageOut:
     """Responde desde la bandeja, como si el negocio escribiera desde el

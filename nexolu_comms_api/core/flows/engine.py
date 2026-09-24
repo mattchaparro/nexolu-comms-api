@@ -1267,6 +1267,13 @@ async def handle_inbound_event(event_id: str) -> None:
     except Exception:
         logger.exception("flows.inbound_error", extra={"event_id": event_id})
 
+    # El aviso al celular va DESPUES: el mensaje ya esta en la bandeja
+    # cuando la persona toca la notificacion. Import tardio: core/push
+    # depende de la BD, no del motor, y asi no se crea un ciclo.
+    from nexolu_comms_api.core.push import notify_inbound_event
+
+    await notify_inbound_event(event_id)
+
 
 async def _handle_inbound_event(event_id: str) -> None:
     async with get_sessionmaker()() as session:

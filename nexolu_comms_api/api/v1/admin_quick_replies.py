@@ -17,7 +17,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nexolu_comms_api.core.auth.dependencies import get_panel_scope, require_scope_for_app
+from nexolu_comms_api.core.auth.dependencies import get_chat_scope
 from nexolu_comms_api.core.auth.panel import PanelScope
 from nexolu_comms_api.core.db.entities import QuickReply
 from nexolu_comms_api.core.db.session import get_session
@@ -57,25 +57,30 @@ def _to_out(row: QuickReply) -> QuickReplyOut:
 @router.get("", response_model=list[QuickReplyOut])
 async def list_quick_replies(
     app_id: str | None = None,
-    scope: PanelScope = Depends(get_panel_scope),
+    scope: PanelScope = Depends(get_chat_scope),
     session: AsyncSession = Depends(get_session),
 ) -> list[QuickReplyOut]:
     query = select(QuickReply).order_by(QuickReply.shortcut)
     if app_id:
         query = query.where(QuickReply.app_id == app_id)
     rows = (await session.execute(query)).scalars().all()
-    return [_to_out(r) for r in rows if scope.allows(r.app_id)]
+    # Las de toda la app ("") las ve cualquiera con la app; las de un
+    # salon, solo quien atiende ese salon.
+    return [_to_out(r) for r in rows if scope.allows_shared(r.app_id, r.business_id)]
 
 
 @router.put("", response_model=QuickReplyOut)
 async def upsert_quick_reply(
     payload: QuickReplyIn,
-    scope: PanelScope = Depends(get_panel_scope),
+    scope: PanelScope = Depends(get_chat_scope),
     session: AsyncSession = Depends(get_session),
 ) -> QuickReplyOut:
     """Upsert por atajo: guardar dos veces "/precios" es corregirlo, no
     terminar con dos respuestas distintas bajo el mismo atajo."""
-    require_scope_for_app(scope, payload.app_id)
+    # Quien solo ve un salon escribe solo las de su salon: las de toda la
+    # app son de todos y no le tocan.
+    if not scope.allows_contact(payload.app_id, payload.business_id):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="App desconocida.")
 
     row = (
         await session.execute(
@@ -104,11 +109,11 @@ async def upsert_quick_reply(
 @router.delete("/{quick_reply_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_quick_reply(
     quick_reply_id: str,
-    scope: PanelScope = Depends(get_panel_scope),
+    scope: PanelScope = Depends(get_chat_scope),
     session: AsyncSession = Depends(get_session),
 ) -> None:
     row = await session.get(QuickReply, quick_reply_id)
-    if row is None or not scope.allows(row.app_id):
+    if row is None or not scope.allows_contact(row.app_id, row.business_id):
         # 404 tambien para lo ajeno, como el resto del panel.
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No existe esa respuesta.")
 

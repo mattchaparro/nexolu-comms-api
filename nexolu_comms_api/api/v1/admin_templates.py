@@ -17,12 +17,17 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from nexolu_comms_api.core.auth.apps import AppIdentity, resolve_by_app_id
-from nexolu_comms_api.core.auth.dependencies import get_panel_scope, require_scope_for_app
+from nexolu_comms_api.core.auth.dependencies import (
+    get_chat_scope,
+    get_panel_scope,
+    require_scope_for_app,
+)
 from nexolu_comms_api.core.auth.panel import PanelScope
-from nexolu_comms_api.core.db.entities import WhatsAppTemplate
+from nexolu_comms_api.core.db.entities import BusinessChannel, WhatsAppTemplate
 from nexolu_comms_api.core.db.session import get_session
 from nexolu_comms_api.core.meta.graph import MetaGraphClient, MetaGraphError
 from nexolu_comms_api.core.templates.service import (
@@ -110,11 +115,26 @@ async def _app_and_target(
 @router.get("", response_model=TemplateListOut)
 async def list_templates(
     app_id: str | None = None,
-    scope: PanelScope = Depends(get_panel_scope),
+    scope: PanelScope = Depends(get_chat_scope),
     session: AsyncSession = Depends(get_session),
 ) -> TemplateListOut:
+    # Lectura abierta a quien atiende el chat: fuera de las 24 h la unica
+    # forma de escribirle a alguien es una plantilla. Crear, sincronizar y
+    # borrar siguen siendo de quien administra la app entera.
     rows = await TemplateRepository(session).list_templates(app_id)
     rows = [row for row in rows if scope.allows(row.app_id)]
+    if scope.is_business_restricted:
+        # Las de la WABA compartida (sin canal) son de todos; las del numero
+        # propio de un negocio, solo de ese negocio.
+        channels = dict(
+            (await session.execute(select(BusinessChannel.id, BusinessChannel.business_id))).all()
+        )
+        rows = [
+            row
+            for row in rows
+            if row.business_channel_id is None
+            or scope.allows_business(channels.get(row.business_channel_id))
+        ]
     return TemplateListOut(items=[_to_out(row) for row in rows])
 
 
