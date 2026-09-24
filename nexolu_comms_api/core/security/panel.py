@@ -36,10 +36,11 @@ def verify_password(password: str, password_hash: str) -> bool:
         return False
 
 
-def create_panel_token(email: str) -> str:
+def create_panel_token(email: str, ttl_hours: int | None = None) -> str:
     settings = get_settings()
     now = datetime.now(UTC)
-    payload = {"sub": email, "iat": now, "exp": now + timedelta(hours=settings.panel_jwt_ttl_hours)}
+    hours = ttl_hours if ttl_hours is not None else settings.panel_jwt_ttl_hours
+    payload = {"sub": email, "iat": now, "exp": now + timedelta(hours=hours)}
     return jwt.encode(payload, settings.panel_jwt_secret, algorithm=_ALGORITHM)
 
 

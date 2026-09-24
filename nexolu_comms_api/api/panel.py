@@ -53,6 +53,9 @@ logger = logging.getLogger(__name__)
 _bearer = HTTPBearer(description="JWT emitido por POST /panel/auth/login o /panel/auth/sso/exchange.")
 
 
+APP_USER_SESSION_HOURS = 24 * 30
+
+
 class LoginRequest(BaseModel):
     email: str
     password: str
@@ -228,7 +231,14 @@ async def ticket_exchange(
         raise invalid
 
     logger.info("panel.ticket_exchange_ok", extra={"app_id": user.origin_app_id})
-    return LoginResponse(token=create_panel_token(identity.email), user=_user_out(identity))
+    # Treinta dias y no uno: esta persona no tiene contrasena ni SSO aca, y
+    # el aviso del celular la trae a Connect a cualquier hora -- con la
+    # sesion vencida caeria en un login que no puede usar. No es mas
+    # permiso: la identidad se resuelve contra la BD en cada peticion, y
+    # desactivarla en su app la corta de inmediato.
+    return LoginResponse(
+        token=create_panel_token(identity.email, ttl_hours=APP_USER_SESSION_HOURS), user=_user_out(identity)
+    )
 
 
 @router.post("/auth/logout", status_code=status.HTTP_204_NO_CONTENT)
