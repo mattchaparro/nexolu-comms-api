@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 _bearer = HTTPBearer(description="JWT emitido por POST /panel/auth/login o /panel/auth/sso/exchange.")
 
 
-APP_USER_SESSION_HOURS = 24 * 30
+APP_USER_SESSION_HOURS = 24 * 365
 
 
 class LoginRequest(BaseModel):
@@ -231,7 +231,7 @@ async def ticket_exchange(
         raise invalid
 
     logger.info("panel.ticket_exchange_ok", extra={"app_id": user.origin_app_id})
-    # Treinta dias y no uno: esta persona no tiene contrasena ni SSO aca, y
+    # Un año, y se renueva al usar el panel: esta persona no tiene contrasena ni SSO aca, y
     # el aviso del celular la trae a Connect a cualquier hora -- con la
     # sesion vencida caeria en un login que no puede usar. No es mas
     # permiso: la identidad se resuelve contra la BD en cada peticion, y
@@ -239,6 +239,25 @@ async def ticket_exchange(
     return LoginResponse(
         token=create_panel_token(identity.email, ttl_hours=APP_USER_SESSION_HOURS), user=_user_out(identity)
     )
+
+
+@router.post("/auth/refresh", response_model=LoginResponse)
+async def refresh(
+    credentials: HTTPAuthorizationCredentials = Depends(_bearer),
+    session: AsyncSession = Depends(get_session),
+) -> LoginResponse:
+    """Un token nuevo para una sesion que sigue viva.
+
+    El panel lo pide al abrirse y cada tanto mientras esta abierto: quien
+    usa Connect todos los dias no vuelve a ver el login, igual que en
+    WhatsApp. Si la persona ya no puede entrar (desactivada, sin
+    membresias), la identidad no resuelve y es 401 como cualquier sesion
+    muerta."""
+    identity = await resolve_identity_by_token(session, credentials.credentials)
+    if identity is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Sesion invalida o expirada.")
+    ttl = APP_USER_SESSION_HOURS if identity.origin_app_id else None
+    return LoginResponse(token=create_panel_token(identity.email, ttl_hours=ttl), user=_user_out(identity))
 
 
 @router.post("/auth/logout", status_code=status.HTTP_204_NO_CONTENT)

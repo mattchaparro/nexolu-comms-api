@@ -12,7 +12,7 @@ entregaria; fuera de ventana el envio igual se intenta y Meta decide
 from __future__ import annotations
 
 import unicodedata
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
@@ -26,7 +26,7 @@ from nexolu_comms_api.core.auth.panel import PanelScope
 from nexolu_comms_api.core.channels.base import OutboundMessage
 from nexolu_comms_api.core.channels.business_channels import resolve_whatsapp_identity
 from nexolu_comms_api.core.channels.registry import get_channel_registry
-from nexolu_comms_api.core.chats import log_outbound_chat, render_template_bubble
+from nexolu_comms_api.core.chats import WindowChecker, log_outbound_chat, render_template_bubble
 from nexolu_comms_api.core.db.entities import ChatMessage, Contact, PanelUser, WhatsAppTemplate
 from nexolu_comms_api.core.db.session import get_session
 from nexolu_comms_api.core.templates.service import TemplateRepository
@@ -204,7 +204,7 @@ async def list_conversations(
         for row in (await session.execute(select(PanelUser))).scalars()
     }
 
-    threshold = datetime.utcnow() - timedelta(hours=WINDOW_HOURS)
+    windows = WindowChecker(session)
     needle = _fold(q or "")
     matched: list[ConversationOut] = []
     unread_total = 0
@@ -248,7 +248,7 @@ async def list_conversations(
                 last_body=message.body[:120],
                 last_direction=message.direction,
                 last_at=message.created_at,
-                window_open=bool(contact.last_inbound_at and contact.last_inbound_at > threshold),
+                window_open=await windows.is_open(contact),
                 unread=unread,
                 last_failed=fallo,
                 assigned_to=contact.assigned_to,
@@ -285,7 +285,6 @@ async def _contact_card(session: AsyncSession, contact: Contact) -> ContactCardO
         user = await session.get(PanelUser, contact.assigned_to)
         assigned_name = (user.full_name or user.email) if user else None
 
-    threshold = datetime.utcnow() - timedelta(hours=WINDOW_HOURS)
     return ContactCardOut(
         contact_id=contact.id,
         app_id=contact.app_id,
@@ -295,7 +294,7 @@ async def _contact_card(session: AsyncSession, contact: Contact) -> ContactCardO
         tags=list(contact.tags),
         fields=dict(contact.fields),
         notes=contact.notes,
-        window_open=bool(contact.last_inbound_at and contact.last_inbound_at > threshold),
+        window_open=await WindowChecker(session).is_open(contact),
         assigned_to=contact.assigned_to,
         assigned_name=assigned_name,
         first_seen_at=first,
@@ -384,7 +383,6 @@ async def assign(
             .limit(1)
         )
     ).scalars().first()
-    threshold = datetime.utcnow() - timedelta(hours=WINDOW_HOURS)
     return ConversationOut(
         contact_id=contact.id,
         app_id=contact.app_id,
@@ -394,7 +392,7 @@ async def assign(
         last_body=last.body[:120] if last else "",
         last_direction=last.direction if last else "in",
         last_at=last.created_at if last else contact.created_at,
-        window_open=bool(contact.last_inbound_at and contact.last_inbound_at > threshold),
+        window_open=await WindowChecker(session).is_open(contact),
         unread=False,
         assigned_to=contact.assigned_to,
         assigned_name=assigned_name,

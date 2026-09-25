@@ -34,6 +34,7 @@ from nexolu_comms_api.core.auth.apps import resolve_by_app_id
 from nexolu_comms_api.core.channels.base import OutboundMessage
 from nexolu_comms_api.core.channels.business_channels import resolve_whatsapp_identity
 from nexolu_comms_api.core.channels.registry import get_channel_registry
+from nexolu_comms_api.core.chats import WindowChecker
 from nexolu_comms_api.core.db.entities import ChatMessage, Contact, InboxAlertConfig
 from nexolu_comms_api.core.db.repository import NotificationRepository
 from nexolu_comms_api.core.db.session import get_sessionmaker
@@ -140,11 +141,10 @@ async def _whatsapp_window_open(
             select(Contact).where(Contact.app_id == app_id, Contact.phone == phone.lstrip("+"))
         )
     ).scalars().first()
-    return bool(
-        contact
-        and contact.last_inbound_at
-        and contact.last_inbound_at > now - timedelta(hours=WINDOW_HOURS)
-    )
+    if contact is None:
+        return False
+    # Con el numero que hoy envia: la ventana es con UN numero del negocio.
+    return await WindowChecker(session).is_open(contact, now)
 
 
 async def send_alerts(now: datetime | None = None) -> int:

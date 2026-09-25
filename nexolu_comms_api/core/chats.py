@@ -12,6 +12,7 @@ partia la conversacion en dos contactos.
 """
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -254,3 +255,50 @@ async def apply_chat_statuses_from_event(event_id: str) -> None:
                 fila.status = nuevo
 
         await session.commit()
+
+
+WINDOW_HOURS = 24
+
+
+class WindowChecker:
+    """¿Se le puede escribir texto libre a este contacto AHORA?
+
+    La ventana de 24 h de Meta es entre la persona y UN numero, no entre la
+    persona y el negocio. Si el negocio cambia de numero (Luxury paso del
+    304 al 301), quien le escribio al viejo tiene la ventana abierta con el
+    viejo; un texto desde el nuevo no le llega. Por eso se compara el
+    numero al que escribio (`last_inbound_phone_number_id`) con el que hoy
+    envia para su app y negocio.
+
+    Cachea el numero que envia por (app, negocio): la bandeja pinta decenas
+    de filas y resolverlo en cada una seria una consulta por fila.
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+        self._senders: dict[tuple[str, str], str | None] = {}
+
+    async def sender_number(self, app_id: str, business_id: str) -> str | None:
+        key = (app_id, business_id)
+        if key not in self._senders:
+            from nexolu_comms_api.core.auth.apps import resolve_by_app_id
+            from nexolu_comms_api.core.channels.business_channels import resolve_whatsapp_identity
+
+            app = await resolve_by_app_id(self._session, app_id)
+            number: str | None = None
+            if app is not None and app.whatsapp is not None:
+                identity, _ = await resolve_whatsapp_identity(self._session, app, business_id or app_id)
+                number = identity.whatsapp.phone_number_id if identity.whatsapp else None
+            self._senders[key] = number
+        return self._senders[key]
+
+    async def is_open(self, contact: Contact, now: datetime | None = None) -> bool:
+        now = now or datetime.utcnow()
+        if not contact.last_inbound_at or contact.last_inbound_at <= now - timedelta(hours=WINDOW_HOURS):
+            return False
+        # Filas de antes de guardar el numero: se confia en la fecha, como
+        # siempre se hizo (al cambiar de numero se rellenan, ver runbook).
+        if not contact.last_inbound_phone_number_id:
+            return True
+        sender = await self.sender_number(contact.app_id, contact.business_id)
+        return sender is None or sender == contact.last_inbound_phone_number_id

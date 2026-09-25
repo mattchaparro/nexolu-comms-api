@@ -1330,6 +1330,7 @@ async def _handle_inbound_event(event_id: str) -> None:
         # disparar un flujo), los keywords se evaluan con ese negocio.
         business_id = business_id or contact.business_id
         contact.last_inbound_at = datetime.utcnow()
+        contact.last_inbound_phone_number_id = event.phone_number_id or contact.last_inbound_phone_number_id
         await session.flush()
 
         # La bandeja: TODO mensaje entrante queda en el historial del chat,

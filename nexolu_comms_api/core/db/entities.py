@@ -424,6 +424,9 @@ class Contact(Base):
     tags: Mapped[list[str]] = mapped_column(JSON, default=list)
     fields: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
     last_inbound_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # A que numero del negocio escribio la ultima vez: la ventana de 24 h
+    # es con ESE numero (ver core/chats.py:WindowChecker).
+    last_inbound_phone_number_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     # Estado de BANDEJA (no de contacto): hasta cuando alguien leyo este
     # hilo, y quien lo esta atendiendo. Vive aca y no en chat_messages
     # porque es por conversacion, no por mensaje - y la conversacion ES el

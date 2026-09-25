@@ -151,7 +151,12 @@ class Settings(BaseSettings):
     panel_full_name: str = "Operador Nexolu"
     panel_password_hash: str = ""  # bcrypt
     panel_jwt_secret: str = ""
-    panel_jwt_ttl_hours: int = 24
+    # Un año, y se renueva sola (POST /panel/auth/refresh) cada vez que se
+    # abre el panel: Connect es el WhatsApp del negocio, y un WhatsApp que
+    # cierra la sesion cada dia no sirve. No es mas permiso: la identidad se
+    # resuelve contra la BD en cada peticion, asi que desactivar a alguien
+    # lo saca de inmediato.
+    panel_jwt_ttl_hours: int = 24 * 365
     # Origenes permitidos para CORS del panel (coma-separados). Vacio = sin
     # CORS - las apps server-side no lo necesitan, solo el navegador del panel.
     panel_cors_origins: str = ""
