@@ -25,6 +25,7 @@ from nexolu_comms_api.core.channels.business_channels import BusinessChannelRepo
 from nexolu_comms_api.core.db.entities import WebhookEvent
 from nexolu_comms_api.core.db.session import get_session
 from nexolu_comms_api.core.flows.engine import handle_inbound_event
+from nexolu_comms_api.core.chats import apply_chat_statuses_from_event
 from nexolu_comms_api.core.templates.service import apply_status_update_from_event
 from nexolu_comms_api.core.webhooks import forwarder
 from nexolu_comms_api.core.webhooks.events import classify
@@ -119,6 +120,8 @@ async def receive_platform_event(
         # Motor de flujos (opt-in por flujos activos): puede responder a un
         # boton o a un keyword. El reenvio a la app duena no cambia.
         background_tasks.add_task(handle_inbound_event, event.id)
+    elif event_type == "status":
+        background_tasks.add_task(apply_chat_statuses_from_event, event.id)
 
     if channel:
         background_tasks.add_task(forwarder.attempt_forward, event.id)
@@ -205,6 +208,10 @@ async def receive_event(
     elif event_type == "message":
         # Motor de flujos, misma nota que en el webhook de plataforma.
         background_tasks.add_task(handle_inbound_event, event.id)
+    elif event_type == "status":
+        # Que la bandeja sepa si llego, se leyo o Meta lo rechazo despues de
+        # aceptarlo. El reenvio a la app duena no cambia.
+        background_tasks.add_task(apply_chat_statuses_from_event, event.id)
 
     if identity.whatsapp.callback_url and identity.whatsapp.callback_secret:
         # Primer intento inmediato, fuera del request: responder rapido y

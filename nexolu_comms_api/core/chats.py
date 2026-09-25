@@ -78,7 +78,62 @@ def outbound_chat_payload(message: OutboundMessage) -> dict[str, Any]:
     if message.template_name:
         payload["template"] = message.template_name
         payload["language"] = message.template_language
+        # Los valores tal cual, en su orden. El cuerpo los junta con " · "
+        # para leerse, y eso no se puede deshacer si un valor trae un punto
+        # medio; con estos se arma la plantilla exacta al mostrarla
+        # (ver render_template_bubble).
+        payload["template_params"] = _template_params(message.template_components, "body")
+        payload["template_header_params"] = _template_params(message.template_components, "header")
     return payload
+
+
+def _template_params(components: list[dict[str, Any]], kind: str) -> list[str]:
+    return [
+        str(p.get("text", ""))
+        for component in components
+        if str(component.get("type", "")).lower() == kind
+        for p in component.get("parameters", [])
+    ]
+
+
+def render_template_bubble(
+    components: list[dict[str, Any]],
+    body_params: list[str],
+    header_params: list[str] | None = None,
+) -> tuple[str, list[dict[str, str]]]:
+    """La plantilla como la RECIBIO la persona: texto y botones.
+
+    La burbuja mostraba "[plantilla cita_nueva_equipo] Marcela · Carolina ·
+    ..." porque se guardaba solo lo que el negocio envio. Con el texto
+    aprobado en Meta (el espejo de `whatsapp_templates`) se rellenan los
+    {{1}}, {{2}}... y quien mira la bandeja lee exactamente lo que llego.
+
+    Un marcador sin valor se deja como estaba: mejor ver "{{3}}" que un
+    hueco que parezca que el mensaje salio incompleto.
+    """
+    def rellenar(texto: str, valores: list[str]) -> str:
+        for i, valor in enumerate(valores, start=1):
+            texto = texto.replace("{{" + str(i) + "}}", valor)
+        return texto
+
+    partes: list[str] = []
+    botones: list[dict[str, str]] = []
+
+    for component in components:
+        tipo = str(component.get("type", "")).upper()
+        if tipo == "HEADER" and str(component.get("format", "TEXT")).upper() == "TEXT":
+            partes.append("*" + rellenar(str(component.get("text", "")), header_params or []) + "*")
+        elif tipo == "BODY":
+            partes.append(rellenar(str(component.get("text", "")), body_params))
+        elif tipo == "FOOTER":
+            partes.append("_" + str(component.get("text", "")) + "_")
+        elif tipo == "BUTTONS":
+            for i, boton in enumerate(component.get("buttons", [])):
+                titulo = str(boton.get("text", "")).strip()
+                if titulo:
+                    botones.append({"id": f"b{i}", "title": titulo})
+
+    return "\n\n".join(p for p in partes if p.strip("*_ ")), botones
 
 
 def log_outbound_chat(
@@ -127,3 +182,75 @@ async def resolve_contact_for_send(
     contact = await ContactRepository(session).get_or_create(app_id, business_id, phone)
     await session.flush()
     return contact
+
+
+# Orden en que avanza un mensaje. Un acuse que llega tarde --el "entregado"
+# despues del "leido"-- no puede hacerlo retroceder.
+_AVANCE = {"sent": 1, "delivered": 2, "read": 3}
+
+
+async def apply_chat_statuses_from_event(event_id: str) -> None:
+    """Refleja en la bandeja lo que Meta dice que paso con cada envio.
+
+    Meta acepta un mensaje y lo rechaza segundos despues, por un aviso
+    aparte. Sin esto la bandeja dejaba el check verde de "enviado" en
+    mensajes que nunca llegaron: los dos avisos a Marcela se veian enviados
+    mientras Meta los habia rechazado.
+
+    Se empareja por el wamid. Los acuses de mensajes que no pasaron por
+    Connect --otra app suscrita al mismo numero-- simplemente no se
+    encuentran. Nunca lanza: es un efecto secundario del webhook.
+    """
+    import json
+    import logging
+
+    from sqlalchemy import select
+
+    from nexolu_comms_api.core.db.entities import WebhookEvent
+    from nexolu_comms_api.core.db.session import get_sessionmaker
+
+    logger = logging.getLogger(__name__)
+
+    async with get_sessionmaker()() as session:
+        event = await session.get(WebhookEvent, event_id)
+        if event is None:
+            return
+
+        try:
+            data = json.loads(event.payload)
+            estados = [
+                s
+                for entry in data.get("entry", [])
+                for change in entry.get("changes", [])
+                for s in (change.get("value", {}).get("statuses") or [])
+            ]
+        except (ValueError, TypeError, AttributeError):
+            logger.warning("chats.status_unparseable", extra={"event_id": event_id})
+            return
+
+        for estado in estados:
+            wamid = estado.get("id")
+            nuevo = estado.get("status")
+            if not wamid or not nuevo:
+                continue
+
+            fila = (
+                await session.execute(select(ChatMessage).where(ChatMessage.wamid == wamid))
+            ).scalars().first()
+            if fila is None:
+                continue
+
+            if nuevo == "failed":
+                error = (estado.get("errors") or [{}])[0]
+                detalle = (error.get("error_data") or {}).get("details") or error.get("message") or error.get("title")
+                if error.get("code") == 131047:
+                    detalle = (
+                        "La persona no le ha escrito a este numero en las ultimas 24 horas "
+                        "y el mensaje salio como texto libre en vez de plantilla."
+                    )
+                fila.status = "failed"
+                fila.payload = {**(fila.payload or {}), "error": f"No se entrego: {detalle}"[:300]}
+            elif fila.status != "failed" and _AVANCE.get(nuevo, 0) > _AVANCE.get(fila.status or "", 0):
+                fila.status = nuevo
+
+        await session.commit()

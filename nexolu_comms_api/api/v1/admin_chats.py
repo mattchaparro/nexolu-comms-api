@@ -26,8 +26,8 @@ from nexolu_comms_api.core.auth.panel import PanelScope
 from nexolu_comms_api.core.channels.base import OutboundMessage
 from nexolu_comms_api.core.channels.business_channels import resolve_whatsapp_identity
 from nexolu_comms_api.core.channels.registry import get_channel_registry
-from nexolu_comms_api.core.chats import log_outbound_chat
-from nexolu_comms_api.core.db.entities import ChatMessage, Contact, PanelUser
+from nexolu_comms_api.core.chats import log_outbound_chat, render_template_bubble
+from nexolu_comms_api.core.db.entities import ChatMessage, Contact, PanelUser, WhatsAppTemplate
 from nexolu_comms_api.core.db.session import get_session
 from nexolu_comms_api.core.templates.service import TemplateRepository
 from nexolu_comms_api.core.webhooks.app_events import post_app_event
@@ -426,19 +426,80 @@ async def list_messages(
             .limit(min(limit, 300))
         )
     ).scalars().all()
+    armadas = await _plantillas_armadas(session, contact.app_id, rows)
+
     return [
         ChatMessageOut(
             id=m.id,
             direction=m.direction,
             message_type=m.message_type,
-            body=m.body,
-            payload=m.payload,
+            body=armadas[m.id][0] if m.id in armadas else m.body,
+            payload=({**(m.payload or {}), "buttons": armadas[m.id][1]} if m.id in armadas else m.payload),
             status=m.status,
             origin=m.origin,
             created_at=m.created_at,
         )
         for m in reversed(rows)
     ]
+
+
+async def _plantillas_armadas(
+    session: AsyncSession, app_id: str, rows: list[ChatMessage]
+) -> dict[str, tuple[str, list[dict[str, str]]]]:
+    """El texto y los botones de cada plantilla del hilo, como los recibio
+    la persona. Se arma al MOSTRAR y no al guardar, para que tambien se lean
+    bien los mensajes que ya estaban (ver render_template_bubble).
+
+    La plantilla se busca en la cuenta ACTUAL de la app antes que en
+    cualquier otra: la misma plantilla puede existir con otro texto en la
+    cuenta de pruebas. Si no esta en el espejo, se deja el resumen de
+    siempre -- peor seria inventar un texto.
+    """
+    con_plantilla = [m for m in rows if (m.payload or {}).get("template")]
+    if not con_plantilla:
+        return {}
+
+    identidad = await resolve_by_app_id(session, app_id)
+    cuenta_actual = identidad.whatsapp.waba_id if identidad and identidad.whatsapp else None
+
+    nombres = {str(m.payload["template"]) for m in con_plantilla}
+    plantillas = (
+        await session.execute(
+            select(WhatsAppTemplate).where(
+                WhatsAppTemplate.app_id == app_id, WhatsAppTemplate.name.in_(nombres)
+            )
+        )
+    ).scalars().all()
+
+    def elegir(nombre: str, idioma: str | None) -> WhatsAppTemplate | None:
+        candidatas = [
+            tpl for tpl in plantillas if tpl.name == nombre and (idioma is None or tpl.language == idioma)
+        ]
+        # La sincronizada más reciente primero, y encima de todo la de la
+        # cuenta actual. Dos pasadas porque `sort` es estable: la segunda
+        # respeta el orden de la primera entre las que empatan.
+        candidatas.sort(key=lambda tpl: tpl.last_synced_at or datetime.min, reverse=True)
+        candidatas.sort(key=lambda tpl: tpl.waba_id != cuenta_actual)
+        return candidatas[0] if candidatas else None
+
+    armadas: dict[str, tuple[str, list[dict[str, str]]]] = {}
+    for m in con_plantilla:
+        payload = m.payload or {}
+        tpl = elegir(str(payload["template"]), payload.get("language"))
+        if tpl is None or not tpl.components:
+            continue
+
+        valores = payload.get("template_params")
+        if valores is None:
+            # Mensajes de antes de guardar los valores: se recuperan del
+            # resumen "[plantilla x] a · b · c".
+            resumen = (m.body or "").split("] ", 1)[-1] if (m.body or "").startswith("[plantilla") else ""
+            valores = resumen.split(" · ") if resumen else []
+
+        armadas[m.id] = render_template_bubble(
+            tpl.components, [str(v) for v in valores], payload.get("template_header_params") or []
+        )
+    return armadas
 
 
 @router.post(
