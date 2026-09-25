@@ -8,7 +8,9 @@ dependencies = [
     "uvicorn[standard]>=0.32",
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
-    "sqlalchemy>=2.0.36",
+    # [asyncio] trae greenlet: desde SQLAlchemy 2.1 ya no viene solo, y sin
+    # el ni el servicio ni alembic arrancan.
+    "sqlalchemy[asyncio]>=2.0.36",
     "aiosqlite>=0.20",
     "aiomysql>=0.2",
     "cryptography>=43.0",
