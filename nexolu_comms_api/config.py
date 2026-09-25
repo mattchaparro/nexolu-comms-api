@@ -170,6 +170,11 @@ class Settings(BaseSettings):
     # `python scripts/generate_vapid.py` y no se rota a la ligera: cambiarlo
     # invalida todas las suscripciones (cada navegador tendria que volver a
     # activar). Vacio = push apagado, el resto del panel sigue igual.
+    # Numeros que el negocio dejo de usar pero siguen recibiendo: se
+    # contesta desde ese numero diciendo a donde escribir, y el mensaje no
+    # va a la app. JSON {phone_number_id: {text, cta_url, cta_title}}. Ver
+    # core/webhooks/retired_numbers.py.
+    retired_number_replies: str = ""
     vapid_public_key: str = ""
     vapid_private_key: str = ""
     vapid_subject: str = "mailto:soporte@nexolu.co"

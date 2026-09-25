@@ -29,6 +29,7 @@ from nexolu_comms_api.core.chats import apply_chat_statuses_from_event
 from nexolu_comms_api.core.templates.service import apply_status_update_from_event
 from nexolu_comms_api.core.webhooks import forwarder
 from nexolu_comms_api.core.webhooks.events import classify
+from nexolu_comms_api.core.webhooks.retired_numbers import answer_on_retired_number, reply_for
 from nexolu_comms_api.core.webhooks.signing import verify_meta_signature
 
 router = APIRouter(prefix="/webhooks/whatsapp", tags=["webhooks"])
@@ -200,6 +201,15 @@ async def receive_event(
             extra={"app_id": app_id, "event_id": event.id, "reason": rejection},
         )
         raise HTTPException(status_code=401, detail=rejection)
+
+    # Un numero que el negocio ya no usa: se le contesta desde ese mismo
+    # numero a donde escribir, y el mensaje no sigue a la app ni a los
+    # flujos (responderian desde el numero nuevo, y eso no se entrega).
+    if event_type == "message" and reply_for(phone_number_id) is not None:
+        event.forward_status = forwarder.STATUS_SKIPPED
+        await session.commit()
+        background_tasks.add_task(answer_on_retired_number, identity, phone_number_id, event.payload)
+        return {"ok": True}
 
     if event_type == "template":
         # Side-effect interno: reflejar el estado en el espejo de
