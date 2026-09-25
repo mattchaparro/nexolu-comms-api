@@ -94,6 +94,19 @@ class WhatsAppOptionIn(BaseModel):
     description: str | None = Field(default=None, max_length=72)
 
 
+class WhatsAppCtaIn(BaseModel):
+    """Un boton que abre un enlace, debajo de `text`.
+
+    Para lo que la clienta tiene que ABRIR, no contestar: el Instagram del
+    salon en la confirmacion de la cita. Pegado como texto era un enlace
+    largo al final del mensaje; en ManyChat era un boton, y lo notaron.
+    WhatsApp corta el titulo a 20 caracteres.
+    """
+
+    url: str = Field(min_length=8, max_length=2000)
+    title: str = Field(min_length=1, max_length=20)
+
+
 class WhatsAppOptionsIn(BaseModel):
     """Opciones tocables: botones (hasta 3) o lista (hasta 10).
 
@@ -136,6 +149,7 @@ class SendRequest(BaseModel):
     whatsapp_template: WhatsAppTemplateIn | None = None
     whatsapp_flow: WhatsAppFlowIn | None = None
     whatsapp_options: WhatsAppOptionsIn | None = None
+    whatsapp_cta: WhatsAppCtaIn | None = None
     whatsapp_product: WhatsAppProductIn | None = None
     whatsapp_products: WhatsAppProductsIn | None = None
     whatsapp_catalog: WhatsAppCatalogIn | None = None
@@ -371,6 +385,8 @@ def _build_message(recipient: str, payload: SendRequest) -> OutboundMessage:
         if options and not as_buttons
         else [],
         list_button=options.button if options and not as_buttons else None,
+        cta_url=payload.whatsapp_cta.url if payload.whatsapp_cta else None,
+        cta_title=payload.whatsapp_cta.title if payload.whatsapp_cta else None,
         product_retailer_id=product.product_retailer_id if product else None,
         product_sections=products.sections if products else [],
         product_header=products.header if products else None,

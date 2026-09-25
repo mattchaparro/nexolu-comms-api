@@ -323,3 +323,27 @@ def test_lo_que_no_es_keyword_sigue_siendo_del_bot_de_la_app(
     assert _signed_inbound(client, _text("573001112233", "¿cuánto vale?")).status_code == 200
 
     assert httpx_mock.get_requests(url=CALLBACK_URL)[-1].headers["X-Nexolu-Flow-Handled"] == "0"
+
+
+def test_the_app_bot_can_send_a_link_button(client, auth_headers, httpx_mock):
+    """El Instagram del salon en la confirmacion: un boton que abre el
+    enlace, no una URL larga pegada al final del texto."""
+    httpx_mock.add_response(url=MESSAGES_URL, json={"messages": [{"id": "wamid.cta"}]})
+    enviado = client.post(
+        "/v1/notifications/send",
+        headers=auth_headers,
+        json={
+            "channels": ["whatsapp"],
+            "to": {"whatsapp": "573001112233"},
+            "text": "¡Tu cita quedó confirmada! ✅",
+            "whatsapp_cta": {"url": "https://www.instagram.com/luxurynails.com.co", "title": "Seguir en Instagram"},
+        },
+    )
+    assert enviado.status_code == 200, enviado.text
+    cuerpo = json.loads(httpx_mock.get_requests(url=MESSAGES_URL)[-1].content)
+    assert cuerpo["interactive"]["type"] == "cta_url"
+    assert cuerpo["interactive"]["body"]["text"].startswith("¡Tu cita quedó confirmada!")
+    assert cuerpo["interactive"]["action"]["parameters"] == {
+        "display_text": "Seguir en Instagram",
+        "url": "https://www.instagram.com/luxurynails.com.co",
+    }
