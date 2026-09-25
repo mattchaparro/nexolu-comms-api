@@ -11,7 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,6 +25,7 @@ from nexolu_comms_api.core.flows.engine import (
     FlowDefinitionError,
     validate_definition,
 )
+from nexolu_comms_api.core.webhooks.app_events import post_contact_renamed
 
 router = APIRouter(prefix="/v1/admin", tags=["admin"])
 
@@ -235,6 +236,7 @@ async def list_contacts(
 async def update_contact(
     contact_id: str,
     payload: ContactPatch,
+    background_tasks: BackgroundTasks,
     scope: PanelScope = Depends(get_panel_scope),
     session: AsyncSession = Depends(get_session),
 ) -> ContactOut:
@@ -243,8 +245,12 @@ async def update_contact(
         raise HTTPException(status_code=404, detail="Contacto desconocido.")
     require_scope_for_app(scope, contact.app_id)
 
-    if payload.name is not None:
-        contact.name = payload.name
+    if payload.name is not None and payload.name.strip() and payload.name.strip() != contact.name:
+        contact.name = payload.name.strip()
+        # La ficha es de la app duena: que se entere del nombre corregido.
+        background_tasks.add_task(
+            post_contact_renamed, contact.app_id, contact.business_id, contact.phone, contact.name
+        )
     if payload.tags is not None:
         contact.tags = list(dict.fromkeys(payload.tags))
     if payload.fields is not None:

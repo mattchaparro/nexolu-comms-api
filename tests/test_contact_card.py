@@ -79,6 +79,8 @@ def test_las_notas_y_los_tags_se_editan_desde_la_bandeja(
     """«Alérgica al acrílico» hay que verlo ANTES de contestar, no después."""
     assert _inbound(client, httpx_mock, "Hola").status_code == 200
     contact_id = _contact_id(client, platform_headers)
+    # Cambiar el nombre le avisa a la app duena (contact_updated).
+    httpx_mock.add_response(url="https://pos.nexolu.test/webhooks/nexolu-comms/whatsapp", json={"ok": True})
 
     editada = client.patch(
         f"/v1/admin/chats/{contact_id}",

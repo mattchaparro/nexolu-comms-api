@@ -26,6 +26,7 @@ from nexolu_comms_api.api.v1 import (
     admin_whatsapp_flows,
     app_users,
     catalog,
+    contacts,
     embed,
     flows,
     health,
@@ -122,6 +123,7 @@ def create_app() -> FastAPI:
     app.include_router(embed.router)
     app.include_router(app_users.router)
     app.include_router(push.router)
+    app.include_router(contacts.router)
 
     # La multimedia subida desde el panel, servida publica: Meta descarga
     # las imagenes de los flujos desde aca (ver api/v1/admin_media.py).

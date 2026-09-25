@@ -60,3 +60,29 @@ async def post_app_event(
         )
         return False
     return True
+
+
+async def post_contact_renamed(app_id: str, business_id: str, phone: str, name: str) -> bool:
+    """`contact_updated`: alguien corrigio el nombre del contacto en el panel.
+
+    La ficha de la clienta es de la app duena (el Spa), no de Connect: sin
+    este aviso, el nombre que alguien arreglo en el chat se quedaba aca y
+    el Spa la seguia saludando como "?". Solo sale de una edicion en el
+    PANEL; cuando es la app la que cambia el nombre (PATCH /v1/contacts),
+    no se le devuelve el eco.
+
+    Abre su propia sesion: corre como background task, despues de que la
+    peticion ya cerro la suya.
+    """
+    from nexolu_comms_api.core.auth.apps import resolve_by_app_id
+    from nexolu_comms_api.core.db.session import get_sessionmaker
+
+    async with get_sessionmaker()() as session:
+        app = await resolve_by_app_id(session, app_id)
+    if app is None:
+        return False
+    return await post_app_event(
+        app.whatsapp,
+        "contact_updated",
+        {"business_id": business_id, "contact": {"phone": phone, "name": name}},
+    )

@@ -30,7 +30,7 @@ from nexolu_comms_api.core.chats import log_outbound_chat, render_template_bubbl
 from nexolu_comms_api.core.db.entities import ChatMessage, Contact, PanelUser, WhatsAppTemplate
 from nexolu_comms_api.core.db.session import get_session
 from nexolu_comms_api.core.templates.service import TemplateRepository
-from nexolu_comms_api.core.webhooks.app_events import post_app_event
+from nexolu_comms_api.core.webhooks.app_events import post_app_event, post_contact_renamed
 
 router = APIRouter(prefix="/v1/admin/chats", tags=["admin-chats"])
 
@@ -318,13 +318,18 @@ async def contact_card(
 async def update_contact_card(
     contact_id: str,
     payload: ContactCardPatch,
+    background_tasks: BackgroundTasks,
     scope: PanelScope = Depends(get_chat_scope),
     session: AsyncSession = Depends(get_session),
 ) -> ContactCardOut:
     contact = await _contact_in_scope(session, contact_id, scope)
 
-    if payload.name is not None:
-        contact.name = payload.name
+    if payload.name is not None and payload.name.strip() and payload.name.strip() != contact.name:
+        contact.name = payload.name.strip()
+        # La ficha es de la app duena: que se entere del nombre corregido.
+        background_tasks.add_task(
+            post_contact_renamed, contact.app_id, contact.business_id, contact.phone, contact.name
+        )
     if payload.tags is not None:
         # Sin duplicados y sin vacios: una lista de tags con "vip" dos veces
         # convierte cualquier filtro en un resultado raro.
