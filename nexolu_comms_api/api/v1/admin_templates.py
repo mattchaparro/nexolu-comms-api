@@ -237,3 +237,64 @@ async def delete_template(
         if sibling.waba_id == row.waba_id and sibling.name == row.name:
             await session.delete(sibling)
     await session.commit()
+
+
+class TemplateDraftIn(BaseModel):
+    app_id: str = Field(min_length=1)
+    business_id: str | None = None
+    # Lo que se quiere decir, en palabras de quien escribe.
+    description: str = Field(min_length=5, max_length=2000)
+    category: str | None = Field(default=None, pattern="^(MARKETING|UTILITY)$")
+
+
+class TemplateDraftOut(BaseModel):
+    name: str
+    category: str
+    body: str
+    footer: str
+    buttons: list[str]
+    example_params: list[str]
+    notes: str
+    # Lo que no cumple las reglas de Meta despues de los reintentos: se
+    # muestra para corregirlo a mano antes de enviar a revision.
+    issues: list[str]
+    components: list[dict[str, Any]]
+
+
+@router.post("/draft", response_model=TemplateDraftOut)
+async def draft_template_with_ai(
+    payload: TemplateDraftIn,
+    scope: PanelScope = Depends(get_panel_scope),
+    session: AsyncSession = Depends(get_session),
+) -> TemplateDraftOut:
+    """Un borrador redactado con IA. NO crea nada en Meta: vuelve al panel
+    para revisarlo y, si sirve, enviarlo con POST /v1/admin/templates."""
+    from nexolu_comms_api.core.templates.drafter import draft_template, to_components
+    from nexolu_comms_api.core.whatsapp_flows.generator import FlowGenerationUnavailable
+
+    require_scope_for_app(scope, payload.app_id)
+    app = await resolve_by_app_id(session, payload.app_id)
+    if app is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="App desconocida.")
+
+    try:
+        draft = await draft_template(
+            payload.description,
+            business_name=app.name,
+            category=payload.category,
+            business_id=payload.business_id,
+        )
+    except FlowGenerationUnavailable as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+    return TemplateDraftOut(
+        name=draft.name,
+        category=draft.category,
+        body=draft.body,
+        footer=draft.footer,
+        buttons=draft.buttons,
+        example_params=draft.example_params,
+        notes=draft.notes,
+        issues=draft.issues,
+        components=to_components(draft),
+    )
