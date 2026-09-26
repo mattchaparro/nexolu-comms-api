@@ -693,3 +693,58 @@ class QuickReply(Base):
     text: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class Broadcast(Base):
+    """Una difusion: una plantilla a un publico, ahora o a una hora.
+
+    El publico no se guarda como lista sino como CRITERIO (`audience`):
+    una difusion programada para el jueves alcanza a quien cumple el
+    criterio el jueves, no a quien lo cumplia cuando se programo -- y no
+    le llega a quien se dio de baja entre tanto. La lista se congela al
+    enviar, en `broadcast_recipients`.
+
+    Los datos con que se filtra (ultima visita, visitas, si acepta
+    promociones) son campos del contacto que la app duena mantiene al dia
+    (PUT /v1/contacts/bulk): Connect no guarda la agenda del negocio.
+    """
+
+    __tablename__ = "broadcasts"
+    __table_args__ = (Index("ix_broadcasts_due", "status", "scheduled_at"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    app_id: Mapped[str] = mapped_column(String(64))
+    business_id: Mapped[str] = mapped_column(String(64), default="")
+    name: Mapped[str] = mapped_column(String(191))
+    template_name: Mapped[str] = mapped_column(String(191))
+    template_language: Mapped[str] = mapped_column(String(16), default="es")
+    # Parametros del cuerpo; "{nombre}" se reemplaza por el nombre de pila.
+    template_params: Mapped[list[str]] = mapped_column(JSON, default=list)
+    audience: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(16), default="draft")  # draft|scheduled|sending|sent|cancelled
+    scheduled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # UTC
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    recipients: Mapped[int] = mapped_column(Integer, default=0)
+    created_by: Mapped[str] = mapped_column(String(191), default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class BroadcastRecipient(Base):
+    """A quien le salio una difusion, y como le fue (el wamid enlaza con
+    la bandeja, donde los acuses de Meta actualizan entregado/leido)."""
+
+    __tablename__ = "broadcast_recipients"
+    __table_args__ = (
+        UniqueConstraint("broadcast_id", "contact_id", name="uq_broadcast_recipient"),
+        Index("ix_broadcast_recipients_wamid", "wamid"),
+    )
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    broadcast_id: Mapped[str] = mapped_column(String(32), index=True)
+    contact_id: Mapped[str] = mapped_column(String(32))
+    phone: Mapped[str] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(16), default="pending")  # pending|sent|failed
+    wamid: Mapped[str | None] = mapped_column(String(191), nullable=True)
+    error: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)

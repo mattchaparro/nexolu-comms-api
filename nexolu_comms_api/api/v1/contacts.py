@@ -13,6 +13,7 @@ en el panel), asi que no hay ida y vuelta infinita.
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
@@ -68,3 +69,83 @@ async def update_contact_name(
             updated += 1
     await session.commit()
     return ContactNameOut(updated=updated)
+
+
+class ContactSyncItem(BaseModel):
+    phone: str = Field(min_length=6, max_length=32)
+    name: str = Field(default="", max_length=128)
+    # Se MEZCLAN con lo que ya tiene el contacto: la app manda lo suyo
+    # (acepta_promociones, ultima_visita...) sin pisar lo que pusieron los
+    # flujos. Un valor null borra ese campo.
+    fields: dict[str, Any] = Field(default_factory=dict)
+    tags_add: list[str] = Field(default_factory=list)
+    tags_remove: list[str] = Field(default_factory=list)
+
+
+class ContactSyncIn(BaseModel):
+    business_id: str = Field(default="", max_length=64)
+    contacts: list[ContactSyncItem] = Field(max_length=500)
+
+
+class ContactSyncOut(BaseModel):
+    created: int
+    updated: int
+
+
+@router.put("/bulk", response_model=ContactSyncOut)
+async def sync_contacts(
+    payload: ContactSyncIn,
+    app: AppIdentity = Depends(get_current_app),
+    session: AsyncSession = Depends(get_session),
+) -> ContactSyncOut:
+    """La app duena publica lo que sabe de sus clientes, para que las
+    difusiones de Connect puedan filtrar por eso (ver core/broadcasts.py).
+
+    A diferencia del PATCH de nombre, este SI crea el contacto: para
+    escribirle a una clienta que nunca le ha escrito a este numero hay que
+    tenerla. No aparece en la bandeja (la bandeja lista conversaciones, no
+    contactos) hasta que haya un mensaje.
+
+    `fields.negocio` queda con el negocio que lo publico: en un numero
+    compartido el contacto puede estar guardado sin negocio (""), y la
+    difusion de un salon tiene que saber que esta clienta es suya.
+    """
+    from nexolu_comms_api.core.flows.engine import ContactRepository
+
+    repo = ContactRepository(session)
+    created = updated = 0
+    for item in payload.contacts:
+        phone = re.sub(r"\D", "", item.phone)
+        if len(phone) < 8:
+            continue
+        before = await session.execute(
+            select(Contact.id).where(Contact.app_id == app.app_id, Contact.phone == phone).limit(1)
+        )
+        is_new = before.first() is None
+        contact = await repo.get_or_create(app.app_id, payload.business_id, phone, item.name.strip())
+
+        fields = dict(contact.fields or {})
+        for key, value in item.fields.items():
+            if value is None:
+                fields.pop(key, None)
+            else:
+                fields[key] = value
+        if payload.business_id:
+            fields["negocio"] = payload.business_id
+        tags = [t for t in (contact.tags or []) if t not in item.tags_remove]
+        tags += [t for t in item.tags_add if t not in tags]
+
+        name = item.name.strip()
+        changed = fields != (contact.fields or {}) or tags != (contact.tags or []) or (name and name != contact.name)
+        contact.fields = fields
+        contact.tags = tags
+        if name:
+            contact.name = name
+        if is_new:
+            created += 1
+        elif changed:
+            updated += 1
+        await session.flush()
+
+    await session.commit()
+    return ContactSyncOut(created=created, updated=updated)

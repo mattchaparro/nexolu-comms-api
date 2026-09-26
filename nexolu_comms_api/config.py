@@ -229,6 +229,9 @@ class Settings(BaseSettings):
     inbox_alert_worker_enabled: bool = True
     inbox_alert_interval_seconds: int = 120
 
+    # Difusiones programadas desde el panel. Ver core/broadcasts.py.
+    broadcast_worker_enabled: bool = True
+
     # Multimedia subida desde el panel (bloque Imagen del builder): se
     # guarda plana en MEDIA_DIR y se sirve publica en /media/<nombre> -
     # Meta descarga por URL. MEDIA_BASE_URL en prod = https://comms.nexolu.co
