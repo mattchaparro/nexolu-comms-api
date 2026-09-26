@@ -13,11 +13,11 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime, timedelta
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from nexolu_comms_api.core.auth.apps import AppIdentity
+from nexolu_comms_api.core.auth.apps import AppIdentity, resolve_by_app_id
 from nexolu_comms_api.core.auth.dependencies import (
     get_current_app,
     get_panel_scope,
@@ -26,6 +26,7 @@ from nexolu_comms_api.core.auth.dependencies import (
 from nexolu_comms_api.core.auth.panel import PanelScope
 from nexolu_comms_api.core.db.repository import NotificationRepository
 from nexolu_comms_api.core.db.session import get_session
+from nexolu_comms_api.core.spend import SpendError, whatsapp_spend
 from nexolu_comms_api.core.telemetry.usage import UsageService
 
 router = APIRouter(prefix="/v1", tags=["usage"])
@@ -235,3 +236,41 @@ async def platform_notifications(
         limit=limit,
         offset=offset,
     )
+
+
+# --- Lo que Meta cobra (pricing_analytics) -----------------------------------
+
+
+@router.get("/usage/whatsapp-spend")
+async def app_whatsapp_spend(
+    month: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}$", description="YYYY-MM; sin mes, el actual."),
+    business_id: str | None = Query(default=None),
+    app: AppIdentity = Depends(get_current_app),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """El gasto real de WhatsApp del mes, según Meta, para la app que llama
+    (y el negocio, si tiene numero propio). Lo usa el spa para su pantalla
+    de gasto."""
+    try:
+        return await whatsapp_spend(session, app, business_id, month)
+    except SpendError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@router.get("/admin/whatsapp-spend")
+async def panel_whatsapp_spend(
+    app_id: str,
+    month: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}$"),
+    business_id: str | None = Query(default=None),
+    scope: PanelScope = Depends(get_panel_scope),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    """Lo mismo, desde el panel de Connect."""
+    require_scope_for_app(scope, app_id)
+    app = await resolve_by_app_id(session, app_id)
+    if app is None:
+        raise HTTPException(status_code=404, detail="App desconocida.")
+    try:
+        return await whatsapp_spend(session, app, business_id, month)
+    except SpendError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc

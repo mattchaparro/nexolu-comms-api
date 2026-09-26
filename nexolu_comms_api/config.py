@@ -122,6 +122,10 @@ class Settings(BaseSettings):
     # todas las apps), las credenciales (phone_number_id/access_token) son
     # por app - ver AppRegistration.whatsapp.
     whatsapp_api_base_url: str = "https://graph.facebook.com/v21.0"
+    # Pesos por dolar, solo para mostrar el gasto de WhatsApp tambien en
+    # dolares aproximados (la cifra exacta es la de Meta, en COP). Ver
+    # core/spend.py.
+    usd_cop_rate: float = 4000.0
 
     # Tarifa por categoria de plantilla, en micro-dolares (1_000_000 = US$1).
     # Meta cobra distinto segun la categoria de la plantilla que se envia -
