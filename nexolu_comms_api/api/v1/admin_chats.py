@@ -264,6 +264,149 @@ async def list_conversations(
     )
 
 
+# -- Directorio: escribirle a alguien que no ha escrito -----------------------
+#
+# La bandeja solo lista conversaciones. Pero las clientas que vienen de la
+# app duena (el Spa publica las suyas, PUT /v1/contacts/bulk) estan como
+# contactos sin un solo mensaje, y quien atiende necesita encontrarlas y
+# abrirles el chat con una plantilla. Rutas bajo /directory para no
+# confundirse con /{contact_id}.
+
+DIRECTORY_LIMIT = 20
+
+
+class DirectoryContactOut(BaseModel):
+    contact_id: str
+    app_id: str
+    business_id: str
+    phone: str
+    name: str
+    has_conversation: bool
+
+
+class DirectoryContactIn(BaseModel):
+    app_id: str = Field(min_length=1)
+    business_id: str = ""
+    phone: str = Field(min_length=7, max_length=32)
+    name: str = Field(default="", max_length=128)
+
+
+def _normalize_phone(raw: str) -> str | None:
+    """Digitos con indicativo. Un celular colombiano escrito a 10 digitos
+    (3xx...) recibe el 57: es como lo escribe todo el mundo en el salon."""
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if len(digits) == 10 and digits.startswith("3"):
+        digits = "57" + digits
+    return digits if 8 <= len(digits) <= 15 else None
+
+
+@router.get("/directory", response_model=list[DirectoryContactOut])
+async def search_directory(
+    q: str = "",
+    app_id: str | None = None,
+    scope: PanelScope = Depends(get_chat_scope),
+    session: AsyncSession = Depends(get_session),
+) -> list[DirectoryContactOut]:
+    """Contactos por nombre o telefono, tengan o no conversacion."""
+    needle = _fold(q)
+    digits = "".join(ch for ch in q if ch.isdigit())
+    if len(needle) < 2:
+        return []
+
+    query = select(Contact)
+    if app_id:
+        query = query.where(Contact.app_id == app_id)
+    elif scope.app_ids is not None:
+        query = query.where(Contact.app_id.in_(scope.app_ids))
+    if digits and len(digits) >= 4:
+        query = query.where(Contact.phone.contains(digits))
+
+    found: list[Contact] = []
+    for contact in (await session.execute(query.order_by(Contact.updated_at.desc()))).scalars():
+        if not scope.allows_contact(contact.app_id, contact.business_id):
+            continue
+        if not (needle in _fold(contact.name) or (digits and digits in contact.phone)):
+            continue
+        found.append(contact)
+        if len(found) >= DIRECTORY_LIMIT:
+            break
+
+    with_messages = set()
+    if found:
+        with_messages = set(
+            (
+                await session.execute(
+                    select(ChatMessage.contact_id)
+                    .where(ChatMessage.contact_id.in_([c.id for c in found]))
+                    .distinct()
+                )
+            ).scalars()
+        )
+    return [
+        DirectoryContactOut(
+            contact_id=c.id,
+            app_id=c.app_id,
+            business_id=c.business_id,
+            phone=c.phone,
+            name=c.name,
+            has_conversation=c.id in with_messages,
+        )
+        for c in found
+    ]
+
+
+@router.post("/directory", response_model=DirectoryContactOut)
+async def add_to_directory(
+    payload: DirectoryContactIn,
+    scope: PanelScope = Depends(get_chat_scope),
+    session: AsyncSession = Depends(get_session),
+) -> DirectoryContactOut:
+    """Un numero que Connect no conoce: se crea el contacto para poder
+    escribirle. Si ya existe, se devuelve el mismo (una persona, un hilo).
+
+    Sin negocio, se deduce: el unico que ve quien escribe, o el unico con
+    numero propio en la app. Un contacto sin negocio sale por el numero
+    general de la app, no por el del salon."""
+    business_id = payload.business_id
+    if not business_id and scope.business_ids is not None and len(scope.business_ids) == 1:
+        business_id = scope.business_ids[0]
+    if not business_id:
+        from nexolu_comms_api.core.channels.business_channels import BusinessChannelRepository
+
+        active = {c.business_id for c in await BusinessChannelRepository(session).list_channels(payload.app_id)
+                  if c.status == "active"}
+        if len(active) == 1:
+            business_id = active.pop()
+
+    if not scope.allows(payload.app_id) or (scope.is_business_restricted and not scope.allows_business(business_id)):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="App desconocida.")
+    phone = _normalize_phone(payload.phone)
+    if phone is None:
+        raise HTTPException(status_code=422, detail="Ese numero no parece un celular valido.")
+
+    from nexolu_comms_api.core.flows.engine import ContactRepository
+
+    contact = await ContactRepository(session).get_or_create(
+        payload.app_id, business_id, phone, payload.name.strip()
+    )
+    if not scope.allows_contact(contact.app_id, contact.business_id):
+        # Existe, pero es de otro salon: no se revela ni se toca.
+        raise HTTPException(status_code=409, detail="Ese numero ya es contacto de otro negocio.")
+    await session.commit()
+
+    has_conversation = (
+        await session.execute(select(ChatMessage.id).where(ChatMessage.contact_id == contact.id).limit(1))
+    ).first() is not None
+    return DirectoryContactOut(
+        contact_id=contact.id,
+        app_id=contact.app_id,
+        business_id=contact.business_id,
+        phone=contact.phone,
+        name=contact.name,
+        has_conversation=has_conversation,
+    )
+
+
 async def _contact_card(session: AsyncSession, contact: Contact) -> ContactCardOut:
     counts = dict(
         (
