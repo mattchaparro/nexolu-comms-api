@@ -66,7 +66,7 @@ def test_si_la_primera_no_cumple_se_corrige_una_vez(client, ia_core, httpx_mock)
 
     response = client.post(
         "/v1/admin/templates/draft",
-        json={"app_id": "pos", "description": "abrir una conversación sin vender nada"},
+        json={"app_id": "pos", "description": "abrir una conversación sin vender nada", "business_name": "Luxury Nails"},
         headers=PLATFORM,
     )
 
@@ -75,7 +75,9 @@ def test_si_la_primera_no_cumple_se_corrige_una_vez(client, ia_core, httpx_mock)
     assert data["issues"] == []
     assert data["name"] == "abrir_conversacion"
     assert data["components"][0]["example"] == {"body_text": [["María"]]}
-    segunda = json.loads(httpx_mock.get_requests(url=IA_URL)[1].content)
+    primera, segunda = (json.loads(r.content) for r in httpx_mock.get_requests(url=IA_URL))
+    # Firma con el negocio que dijo quien redacta, no con el nombre de la app.
+    assert "Negocio: Luxury Nails" in primera["user"]
     assert "Corrige esto" in segunda["user"]
 
 

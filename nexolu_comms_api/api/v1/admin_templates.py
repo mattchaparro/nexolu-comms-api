@@ -245,6 +245,9 @@ class TemplateDraftIn(BaseModel):
     # Lo que se quiere decir, en palabras de quien escribe.
     description: str = Field(min_length=5, max_length=2000)
     category: str | None = Field(default=None, pattern="^(MARKETING|UTILITY)$")
+    # Como firma el mensaje ("Luxury Nails"). La app puede tener muchos
+    # negocios y Connect no sabe sus nombres: lo dice quien redacta.
+    business_name: str = Field(default="", max_length=128)
 
 
 class TemplateDraftOut(BaseModel):
@@ -280,7 +283,7 @@ async def draft_template_with_ai(
     try:
         draft = await draft_template(
             payload.description,
-            business_name=app.name,
+            business_name=payload.business_name.strip(),
             category=payload.category,
             business_id=payload.business_id,
         )

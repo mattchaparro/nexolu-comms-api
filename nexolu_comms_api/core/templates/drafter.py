@@ -136,7 +136,12 @@ def to_components(draft: TemplateDraft) -> list[dict[str, Any]]:
 
 
 def _user_prompt(description: str, business_name: str, category: str | None, previous: str | None, issues: list[str]) -> str:
-    parts = [f"Negocio: {business_name}", f"Lo que se quiere decir: {description.strip()}"]
+    firma = (
+        f"Negocio: {business_name}"
+        if business_name
+        else "Negocio: sin nombre. No inventes uno: si hace falta, di \"el salón\"."
+    )
+    parts = [firma, f"Lo que se quiere decir: {description.strip()}"]
     if category:
         parts.append(f"Categoría pedida: {category}. Si el contenido no cabe en ella, dilo en notes.")
     if previous and issues:
