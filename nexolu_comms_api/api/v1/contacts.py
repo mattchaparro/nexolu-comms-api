@@ -149,3 +149,50 @@ async def sync_contacts(
 
     await session.commit()
     return ContactSyncOut(created=created, updated=updated)
+
+
+BOT_PAUSED_FIELD = "bot_paused_until"
+
+
+class BotPauseIn(BaseModel):
+    phone: str = Field(min_length=6, max_length=32)
+    business_id: str = Field(default="", max_length=64)
+    # ISO-8601 en UTC, o null si el bot volvio a atender.
+    paused_until: str | None = Field(default=None, max_length=40)
+
+
+@router.put("/bot-pause", response_model=ContactNameOut)
+async def set_bot_pause(
+    payload: BotPauseIn,
+    app: AppIdentity = Depends(get_current_app),
+    session: AsyncSession = Depends(get_session),
+) -> ContactNameOut:
+    """Hasta cuando esta callado el bot de la app con este contacto.
+
+    La pausa es de la app (el Spa la pone cuando alguien del equipo contesta
+    o cuando el bot pasa la conversacion a una persona). Connect solo la
+    MUESTRA en el chat, con un boton para reactivarlo -- que avisa a la app
+    con `agent_resume`. Sin esto no habia como quitarla desde aqui: habia
+    que esperar las dos horas.
+    """
+    phone = re.sub(r"\D", "", payload.phone)
+    contacts = (
+        await session.execute(
+            select(Contact).where(
+                Contact.app_id == app.app_id,
+                Contact.phone == phone,
+                Contact.business_id.in_({payload.business_id, ""}),
+            )
+        )
+    ).scalars().all()
+
+    for contact in contacts:
+        # Un dict NUEVO: mutar el JSON en su lugar no lo marca como cambiado.
+        fields = dict(contact.fields or {})
+        if payload.paused_until:
+            fields[BOT_PAUSED_FIELD] = payload.paused_until
+        else:
+            fields.pop(BOT_PAUSED_FIELD, None)
+        contact.fields = fields
+    await session.commit()
+    return ContactNameOut(updated=len(contacts))

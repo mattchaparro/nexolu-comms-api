@@ -495,6 +495,36 @@ async def mark_read(
     await session.commit()
 
 
+@router.post("/{contact_id}/bot/resume", status_code=status.HTTP_204_NO_CONTENT)
+async def resume_bot(
+    contact_id: str,
+    background_tasks: BackgroundTasks,
+    scope: PanelScope = Depends(get_chat_scope),
+    session: AsyncSession = Depends(get_session),
+) -> None:
+    """Que el bot de la app vuelva a contestarle a este contacto.
+
+    La pausa es de la app: aqui se borra la marca que ella dejo y se le
+    avisa (`agent_resume`) para que suelte la suya. Si la app no responde,
+    la marca igual se va -- mostrar "en pausa" cuando ya no lo esta seria
+    peor -- y la pausa de la app vence sola.
+    """
+    contact = await _contact_in_scope(session, contact_id, scope)
+    fields = dict(contact.fields or {})
+    fields.pop("bot_paused_until", None)
+    contact.fields = fields
+    await session.commit()
+
+    app = await resolve_by_app_id(session, contact.app_id)
+    if app is not None:
+        background_tasks.add_task(
+            post_app_event,
+            app.whatsapp,
+            "agent_resume",
+            {"business_id": contact.business_id, "contact": {"name": contact.name, "phone": contact.phone}},
+        )
+
+
 @router.post("/{contact_id}/assign", response_model=ConversationOut)
 async def assign(
     contact_id: str,
