@@ -11,11 +11,13 @@ entregaria; fuera de ventana el envio igual se intenta y Meta decide
 """
 from __future__ import annotations
 
+import mimetypes
 import unicodedata
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Response, status
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -493,6 +495,64 @@ async def mark_read(
     contact = await _contact_in_scope(session, contact_id, scope)
     contact.last_read_at = datetime.utcnow()
     await session.commit()
+
+
+@router.get("/{contact_id}/messages/{message_id}/media")
+async def inbound_media(
+    contact_id: str,
+    message_id: str,
+    scope: PanelScope = Depends(get_chat_scope),
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    """El audio, la imagen o el video que mando la clienta, para verlo aqui.
+
+    Meta solo da un id; esto lo baja con el token del numero y lo guarda la
+    primera vez (ver core/media_inbound). El panel lo pide con su sesion y
+    lo reproduce desde un blob: un <audio src> no puede mandar el token.
+    """
+    from nexolu_comms_api.config import get_settings
+    from nexolu_comms_api.core.media_inbound import (
+        MEDIA_TYPES,
+        MediaUnavailable,
+        download_from_meta,
+        extension_for,
+    )
+
+    contact = await _contact_in_scope(session, contact_id, scope)
+    message = (
+        await session.execute(
+            select(ChatMessage).where(ChatMessage.id == message_id, ChatMessage.contact_id == contact.id)
+        )
+    ).scalar_one_or_none()
+    if message is None or message.direction != "in" or message.message_type not in MEDIA_TYPES:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Ese mensaje no trae archivo.")
+
+    settings = get_settings()
+    carpeta = Path(settings.media_dir) / "inbound"
+    guardados = list(carpeta.glob(f"{message.id}.*")) if carpeta.exists() else []
+    if guardados:
+        archivo = guardados[0]
+        return Response(
+            content=archivo.read_bytes(),
+            media_type=mimetypes.guess_type(archivo.name)[0] or "application/octet-stream",
+        )
+
+    media = (message.payload or {}).get(message.message_type) or {}
+    app = await resolve_by_app_id(session, contact.app_id)
+    if app is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="App desconocida.")
+    identity, _ = await resolve_whatsapp_identity(session, app, contact.business_id)
+
+    try:
+        content, mime = await download_from_meta(
+            identity, str(media.get("id") or ""), settings.whatsapp_api_base_url, settings.http_timeout_seconds
+        )
+    except MediaUnavailable as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
+
+    carpeta.mkdir(parents=True, exist_ok=True)
+    (carpeta / f"{message.id}{extension_for(mime) or '.bin'}").write_bytes(content)
+    return Response(content=content, media_type=mime)
 
 
 @router.post("/{contact_id}/bot/resume", status_code=status.HTTP_204_NO_CONTENT)

@@ -70,3 +70,40 @@ async def upload_media(
 
     base = settings.media_base_url.rstrip("/") or str(request.base_url).rstrip("/")
     return MediaOut(url=f"{base}/media/{name}", filename=name)
+
+
+# Lo que graba el navegador: webm/opus (Chrome, Android), mp4/aac (Safari,
+# iPhone), ogg (Firefox). Ninguno es lo que WhatsApp quiere para una nota de
+# voz salvo el ogg/opus, asi que todo se convierte a ese.
+VOICE_EXTENSIONS = {".webm", ".ogg", ".m4a", ".mp4", ".aac", ".mp3", ".wav"}
+
+
+@router.post("/voice", response_model=MediaOut, status_code=status.HTTP_201_CREATED)
+async def upload_voice_note(
+    request: Request,
+    file: UploadFile,
+    _scope: PanelScope = Depends(get_chat_scope),
+) -> MediaOut:
+    """Una nota de voz grabada en el chat, lista para mandarla por WhatsApp."""
+    from nexolu_comms_api.core.media_inbound import to_whatsapp_voice
+
+    extension = Path(file.filename or "").suffix.lower() or ".webm"
+    if extension not in VOICE_EXTENSIONS:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Formato de audio no reconocido.")
+
+    content = await file.read()
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="El audio es muy largo.")
+
+    try:
+        ogg = await to_whatsapp_voice(content, extension)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+    settings = get_settings()
+    media_dir = Path(settings.media_dir)
+    media_dir.mkdir(parents=True, exist_ok=True)
+    name = f"{uuid.uuid4().hex}.ogg"
+    (media_dir / name).write_bytes(ogg)
+    base = settings.media_base_url.rstrip("/") or str(request.base_url).rstrip("/")
+    return MediaOut(url=f"{base}/media/{name}", filename=name)
