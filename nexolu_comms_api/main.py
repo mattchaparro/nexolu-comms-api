@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import mimetypes
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
@@ -12,8 +13,8 @@ from fastapi.staticfiles import StaticFiles
 from nexolu_comms_api.api import panel, webhooks
 from nexolu_comms_api.api.v1 import (
     admin_alerts,
-    admin_broadcasts,
     admin_apps,
+    admin_broadcasts,
     admin_catalog,
     admin_channels,
     admin_chats,
@@ -82,6 +83,27 @@ async def lifespan(app: FastAPI):
             await task
 
 
+def _register_media_types() -> None:
+    """Los tipos que Meta exige al bajar un archivo por link.
+
+    La imagen slim de Python no trae /etc/mime.types: `.ogg` salia como
+    application/octet-stream y Meta rechazaba la nota de voz («Unsupported
+    Audio mime type»). Se registran a mano, sin depender del sistema.
+    """
+    for mime, extension in (
+        ("audio/ogg", ".ogg"),
+        ("audio/mpeg", ".mp3"),
+        ("audio/mp4", ".m4a"),
+        ("audio/aac", ".aac"),
+        ("audio/amr", ".amr"),
+        ("video/mp4", ".mp4"),
+        ("video/3gpp", ".3gp"),
+        ("image/webp", ".webp"),
+        ("application/pdf", ".pdf"),
+    ):
+        mimetypes.add_type(mime, extension)
+
+
 def create_app() -> FastAPI:
     app = FastAPI(
         title="Nexolu Communications",
@@ -135,6 +157,7 @@ def create_app() -> FastAPI:
     # las imagenes de los flujos desde aca (ver api/v1/admin_media.py).
     media_dir = Path(settings.media_dir)
     media_dir.mkdir(parents=True, exist_ok=True)
+    _register_media_types()
     app.mount("/media", StaticFiles(directory=str(media_dir)), name="media")
 
     return app

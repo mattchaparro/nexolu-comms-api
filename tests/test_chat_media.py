@@ -99,3 +99,22 @@ def test_la_nota_de_voz_grabada_se_convierte_a_ogg(client, monkeypatch, tmp_path
     assert response.json()["url"].endswith(".ogg")
     assert (tmp_path / response.json()["filename"]).read_bytes() == b"OggS-convertido"
     get_settings.cache_clear()
+
+
+def test_la_nota_de_voz_se_sirve_como_audio_ogg(client, tmp_path):
+    """Meta rechazaba la nota de voz porque el link respondia
+    application/octet-stream: la imagen slim no sabe que es un .ogg."""
+    import mimetypes
+
+    from nexolu_comms_api.config import get_settings
+
+    assert mimetypes.guess_type("nota.ogg")[0] == "audio/ogg"
+
+    media_dir = __import__("pathlib").Path(get_settings().media_dir)
+    media_dir.mkdir(parents=True, exist_ok=True)
+    (media_dir / "prueba-tipo.ogg").write_bytes(b"OggS")
+    try:
+        response = client.get("/media/prueba-tipo.ogg")
+        assert response.headers["content-type"].startswith("audio/ogg")
+    finally:
+        (media_dir / "prueba-tipo.ogg").unlink()
