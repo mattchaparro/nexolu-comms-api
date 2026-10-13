@@ -279,3 +279,38 @@ def test_la_bandeja_la_muestra_pendiente_y_dice_por_que(
     assert fallido["status"] == "failed"
     # El motivo viaja con el mensaje para que el panel lo pueda explicar.
     assert "131030" in fallido["payload"]["error"]
+
+
+def _bot_contesta(client, auth_headers, httpx_mock, texto: str = "Ya le avisé a alguien del local."):
+    httpx_mock.add_response(url=MESSAGES_URL, json={"messages": [{"id": "wamid.bot"}]})
+    response = client.post(
+        "/v1/notifications/send",
+        headers=auth_headers,
+        json={"channels": ["whatsapp"], "to": {"whatsapp": "573001112233"}, "text": texto},
+    )
+    assert response.status_code == 200, response.text
+
+
+def test_un_pase_a_persona_sin_respuesta_tambien_avisa(client, platform_headers, auth_headers, httpx_mock):
+    """Lo ultimo era el bot diciendo «ya le avise a alguien», y el aviso no
+    salia nunca: cinco pases sin respuesta en la auditoria del 13-oct."""
+    _configure(client, platform_headers)
+    assert _inbound(client, httpx_mock, "¿Me das la dirección?").status_code == 200
+    _bot_contesta(client, auth_headers, httpx_mock)
+    hasta = (datetime.utcnow() + timedelta(hours=2)).isoformat() + "+00:00"
+    client.put(
+        "/v1/contacts/bot-pause",
+        headers=auth_headers,
+        json={"phone": "573001112233", "paused_until": hasta},
+    )
+
+    httpx_mock.add_response(url=BREVO_URL, json={"messageId": "<brevo-pase>"})
+    assert _run_alerts() == 1
+
+
+def test_sin_pase_lo_que_contesto_el_bot_no_avisa(client, platform_headers, auth_headers, httpx_mock):
+    _configure(client, platform_headers)
+    assert _inbound(client, httpx_mock, "¿Tienen hora?").status_code == 200
+    _bot_contesta(client, auth_headers, httpx_mock, "¡Sí! A las 3 pm.")
+
+    assert _run_alerts() == 0

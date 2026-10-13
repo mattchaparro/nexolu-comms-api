@@ -50,6 +50,52 @@ MAX_LISTED = 5
 PANEL_URL = "https://connect.nexolu.co/chat"
 
 
+async def _waiting_for_human(
+    session: AsyncSession, contact: Contact, now: datetime
+) -> ChatMessage | None:
+    """El ultimo mensaje de ella, si el bot de la app esta en pausa (le
+    paso la conversacion a una persona) y nadie contesto desde el panel
+    despues. None si no aplica."""
+    pausa = (contact.fields or {}).get("bot_paused_until")
+    if not isinstance(pausa, str) or not pausa:
+        return None
+    try:
+        hasta = datetime.fromisoformat(pausa)
+    except ValueError:
+        return None
+    if hasta.tzinfo is not None:
+        # A UTC sin zona, como guarda todo este servicio.
+        hasta = (hasta - (hasta.utcoffset() or timedelta())).replace(tzinfo=None)
+    if hasta <= now:
+        return None
+
+    ultimo_de_ella = (
+        await session.execute(
+            select(ChatMessage)
+            .where(ChatMessage.contact_id == contact.id, ChatMessage.direction == "in")
+            .order_by(ChatMessage.created_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if ultimo_de_ella is None:
+        return None
+
+    contestado = (
+        await session.execute(
+            select(ChatMessage.id)
+            .where(
+                ChatMessage.contact_id == contact.id,
+                ChatMessage.direction == "out",
+                ChatMessage.origin == "panel",
+                ChatMessage.status != "failed",
+                ChatMessage.created_at >= ultimo_de_ella.created_at,
+            )
+            .limit(1)
+        )
+    ).first()
+    return None if contestado is not None else ultimo_de_ella
+
+
 async def pending_conversations(
     session: AsyncSession, config: InboxAlertConfig, now: datetime | None = None
 ) -> list[tuple[Contact, ChatMessage]]:
@@ -94,8 +140,17 @@ async def pending_conversations(
         seen.add(contact.id)
         if config.business_id and contact.business_id != config.business_id:
             continue
-        # Lo ultimo tiene que ser de ELLA, sin leer y con rato encima.
-        if message.direction != "in" or message.created_at > cutoff:
+        # Lo ultimo tiene que ser de ELLA, sin leer y con rato encima...
+        if message.direction != "in":
+            # ...salvo que la app haya pasado la conversacion a una persona
+            # (su bot esta en pausa) y nadie del equipo haya contestado: ahi
+            # lo ultimo es el bot diciendo «ya le avise a alguien» y el aviso
+            # no salia nunca. Auditoria del 13-oct: cinco pases sin respuesta.
+            esperando = await _waiting_for_human(session, contact, now)
+            if esperando is None:
+                continue
+            message = esperando
+        if message.created_at > cutoff:
             continue
         if contact.last_read_at is not None and contact.last_read_at >= message.created_at:
             continue
