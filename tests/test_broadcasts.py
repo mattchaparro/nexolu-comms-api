@@ -174,3 +174,44 @@ def test_otra_app_no_ve_las_difusiones(client, auth_headers):
     _difusion(client)
 
     assert client.get("/v1/admin/broadcasts", headers=auth_headers).status_code in (401, 403, 404)
+
+
+def test_el_publico_puede_ser_quien_ya_recibio_una_plantilla(client, auth_headers, httpx_mock):
+    """«Las clientas de las difusiones pasadas»: sale del historial, no hay
+    que recordar a quien se le mando."""
+    _sync(
+        client,
+        auth_headers,
+        [
+            {"phone": "573001110001", "name": "Ana", "fields": {"acepta_promociones": True}},
+            {"phone": "573001110002", "name": "Luisa", "fields": {"acepta_promociones": True}},
+            {"phone": "573001110003", "name": "Marta", "fields": {"acepta_promociones": True}},
+        ],
+    )
+    _plantilla("MARKETING", name="promo_octubre")
+    _plantilla("MARKETING", name="halloween_unas")
+
+    # La difusion pasada le salio a las tres.
+    _difusion(
+        client,
+        audience={"contact_ids": []},
+        scheduled_at=(datetime.utcnow() - timedelta(minutes=1)).isoformat(),
+    )
+    httpx_mock.add_response(url=MESSAGES_URL, json={"messages": [{"id": "wamid.a"}]})
+    httpx_mock.add_response(url=MESSAGES_URL, json={"messages": [{"id": "wamid.b"}]})
+    httpx_mock.add_response(url=MESSAGES_URL, json={"messages": [{"id": "wamid.c"}]})
+    assert _dispatch_due() == 3
+
+    def preview(audience):
+        return client.post(
+            "/v1/admin/broadcasts/preview",
+            json={"app_id": "pos", "business_id": "7", "name": "x", "template_name": "halloween_unas", "audience": audience},
+            headers=PLATFORM,
+        ).json()["count"]
+
+    assert preview({}) == 3
+    assert preview({"received_templates": ["promo_octubre"]}) == 3
+    assert preview({"received_templates": ["otra_que_nadie_recibio"]}) == 0
+    # Segunda ola: a quien todavia no le llego la de Halloween.
+    assert preview({"not_received_templates": ["halloween_unas"]}) == 3
+    assert preview({"not_received_templates": ["promo_octubre"]}) == 0

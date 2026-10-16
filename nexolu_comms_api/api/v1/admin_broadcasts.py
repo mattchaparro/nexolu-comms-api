@@ -38,6 +38,10 @@ class Audience(BaseModel):
     tags_any: list[str] = Field(default_factory=list)
     tags_none: list[str] = Field(default_factory=list)
     contact_ids: list[str] = Field(default_factory=list)
+    # Quienes YA recibieron alguna de estas plantillas (cualquier difusion
+    # pasada, de Connect o de la app) / quienes NO recibieron ninguna.
+    received_templates: list[str] = Field(default_factory=list)
+    not_received_templates: list[str] = Field(default_factory=list)
     require_marketing_opt_in: bool = False
 
 

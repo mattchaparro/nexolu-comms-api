@@ -126,6 +126,35 @@ async def template_category(session: AsyncSession, app_id: str, name: str, langu
     return row.category if row else None
 
 
+async def _contacts_that_received(
+    session: AsyncSession, app_id: str, template_names: list[str] | None
+) -> set[str] | None:
+    """Los contactos a quienes ya se les envio alguna de esas plantillas.
+
+    Sale del historial de la conversacion (chat_messages), que anota la
+    plantilla de TODO lo que sale -- una difusion de Connect o un aviso que
+    mando la app --, asi que "las difusiones pasadas" incluye las que se
+    mandaron antes de que existieran las difusiones de Connect. Cuenta lo
+    intentado, salio o fallara: la lista es a quien SE LE ESCRIBIO.
+
+    None = no se pidio este filtro.
+    """
+    if not template_names:
+        return None
+    rows = (
+        await session.execute(
+            select(ChatMessage.contact_id)
+            .where(
+                ChatMessage.app_id == app_id,
+                ChatMessage.direction == "out",
+                ChatMessage.payload["template"].as_string().in_(template_names),
+            )
+            .distinct()
+        )
+    ).scalars()
+    return set(rows)
+
+
 async def audience_contacts(session: AsyncSession, broadcast: Broadcast) -> list[Contact]:
     """Los contactos que hoy cumplen el criterio (uno por telefono)."""
     category = await template_category(session, broadcast.app_id, broadcast.template_name, broadcast.template_language)
@@ -136,10 +165,18 @@ async def audience_contacts(session: AsyncSession, broadcast: Broadcast) -> list
         query = query.where(Contact.business_id.in_([broadcast.business_id, ""]))
     contacts = (await session.execute(query.order_by(Contact.created_at))).scalars().all()
 
+    audience = broadcast.audience or {}
+    received = await _contacts_that_received(session, broadcast.app_id, audience.get("received_templates"))
+    not_received = await _contacts_that_received(session, broadcast.app_id, audience.get("not_received_templates"))
+
     seen: set[str] = set()
     result: list[Contact] = []
     for contact in contacts:
         if not contact.phone or contact.phone in seen:
+            continue
+        if received is not None and contact.id not in received:
+            continue
+        if not_received is not None and contact.id in not_received:
             continue
         # Uno sin negocio ("" del numero compartido) es de este salon solo
         # si el salon lo publico como suyo (PUT /v1/contacts/bulk).
