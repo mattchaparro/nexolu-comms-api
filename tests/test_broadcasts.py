@@ -215,3 +215,54 @@ def test_el_publico_puede_ser_quien_ya_recibio_una_plantilla(client, auth_header
     # Segunda ola: a quien todavia no le llego la de Halloween.
     assert preview({"not_received_templates": ["halloween_unas"]}) == 3
     assert preview({"not_received_templates": ["promo_octubre"]}) == 0
+
+
+def test_el_publico_puede_ser_quien_escribio_hace_poco_y_la_vista_previa_dice_a_quien_deja_fuera(
+    client, auth_headers
+):
+    """«Han escrito recientemente» + por que alguien no entra."""
+    from nexolu_comms_api.core.db.entities import ChatMessage, Contact
+    from nexolu_comms_api.core.db.session import get_sessionmaker
+
+    _sync(
+        client,
+        auth_headers,
+        [
+            {"phone": "573001110001", "name": "Ana", "fields": {"acepta_promociones": True}},
+            {"phone": "573001110002", "name": "Luisa", "fields": {"acepta_promociones": False}},
+            {"phone": "573001110003", "name": "Marta", "fields": {"acepta_promociones": True}},
+            {"phone": "573001110004", "name": "Sin ficha", "fields": {}},
+        ],
+    )
+    _plantilla("MARKETING", name="halloween_unas")
+
+    async def escriben():
+        from sqlalchemy import select
+
+        async with get_sessionmaker()() as session:
+            for phone in ("573001110001", "573001110002", "573001110004"):
+                contact = (await session.execute(select(Contact).where(Contact.phone == phone))).scalars().one()
+                session.add(
+                    ChatMessage(
+                        app_id="pos", business_id="7", contact_id=contact.id, direction="in",
+                        message_type="text", body="hola", created_at=datetime.utcnow() - timedelta(days=2),
+                    )
+                )
+            await session.commit()
+
+    asyncio.run(escriben())
+
+    hace_una_semana = (datetime.utcnow() - timedelta(days=7)).date().isoformat()
+    preview = client.post(
+        "/v1/admin/broadcasts/preview",
+        json={"app_id": "pos", "business_id": "7", "name": "x", "template_name": "halloween_unas",
+              "audience": {"wrote_since": hace_una_semana}},
+        headers=PLATFORM,
+    ).json()
+
+    # Ana escribio y acepta. Luisa escribio pero NO acepta; "Sin ficha"
+    # escribio y no se sabe; Marta acepta pero no ha escrito.
+    assert preview["count"] == 1
+    assert [c["name"] for c in preview["sample"]] == ["Ana"]
+    assert preview["excluded_no_opt_in"] == 1
+    assert preview["excluded_unknown"] == 1

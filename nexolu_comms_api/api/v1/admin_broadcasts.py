@@ -42,6 +42,8 @@ class Audience(BaseModel):
     # pasada, de Connect o de la app) / quienes NO recibieron ninguna.
     received_templates: list[str] = Field(default_factory=list)
     not_received_templates: list[str] = Field(default_factory=list)
+    # YYYY-MM-DD: quienes escribieron desde esa fecha («han escrito hace poco»).
+    wrote_since: str | None = None
     require_marketing_opt_in: bool = False
 
 
@@ -81,6 +83,11 @@ class PreviewOut(BaseModel):
     category: str | None
     template_status: str | None
     sample: list[dict[str, str]]
+    # A quienes cumplen todo lo demas pero NO se les puede mandar, y por que:
+    # `no_opt_in` dijeron que no quieren promociones; `unknown` no se sabe
+    # (no tienen ficha en la app o no se ha sincronizado).
+    excluded_no_opt_in: int = 0
+    excluded_unknown: int = 0
 
 
 def _utc(value: datetime | None) -> datetime | None:
@@ -174,6 +181,15 @@ async def preview(
         audience=payload.audience.model_dump(exclude_defaults=True),
     )
     contacts = await core.audience_contacts(session, draft)
+    kept = {c.id for c in contacts}
+    no_opt_in = unknown = 0
+    for c in await core.audience_contacts(session, draft, enforce_opt_in=False):
+        if c.id in kept:
+            continue
+        if (c.fields or {}).get("acepta_promociones") is False:
+            no_opt_in += 1
+        else:
+            unknown += 1
     template = (
         await session.execute(
             select(WhatsAppTemplate).where(
@@ -188,6 +204,8 @@ async def preview(
         category=template.category if template else None,
         template_status=template.status if template else None,
         sample=[{"name": c.name, "phone": c.phone} for c in contacts[:20]],
+        excluded_no_opt_in=no_opt_in,
+        excluded_unknown=unknown,
     )
 
 

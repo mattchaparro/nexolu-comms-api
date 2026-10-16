@@ -69,15 +69,18 @@ def _as_date(value: Any) -> date | None:
         return None
 
 
-def matches(contact: Contact, audience: dict[str, Any], marketing: bool) -> bool:
-    """Si este contacto entra en el publico."""
+def matches(contact: Contact, audience: dict[str, Any], marketing: bool, enforce_opt_in: bool = True) -> bool:
+    """Si este contacto entra en el publico.
+
+    `enforce_opt_in=False` solo lo usa la vista previa, para contar a quien
+    se queda fuera POR no aceptar promociones. Un envio real siempre lo exige."""
     fields = contact.fields or {}
     tags = set(contact.tags or [])
 
     if audience.get("contact_ids") and contact.id not in audience["contact_ids"]:
         return False
 
-    if (marketing or audience.get("require_marketing_opt_in")) and fields.get("acepta_promociones") is not True:
+    if enforce_opt_in and (marketing or audience.get("require_marketing_opt_in")) and fields.get("acepta_promociones") is not True:
         return False
 
     last = _as_date(fields.get("ultima_visita"))
@@ -155,7 +158,32 @@ async def _contacts_that_received(
     return set(rows)
 
 
-async def audience_contacts(session: AsyncSession, broadcast: Broadcast) -> list[Contact]:
+async def _contacts_that_wrote(session: AsyncSession, app_id: str, since: str | None) -> set[str] | None:
+    """Los contactos que ESCRIBIERON (mensaje entrante) desde esa fecha.
+
+    Es el «han escrito recientemente»: la gente con la que se habla hoy, que
+    puede no tener ficha ni haber recibido nunca una difusion. None = sin filtro.
+    """
+    day = _as_date(since)
+    if day is None:
+        return None
+    rows = (
+        await session.execute(
+            select(ChatMessage.contact_id)
+            .where(
+                ChatMessage.app_id == app_id,
+                ChatMessage.direction == "in",
+                ChatMessage.created_at >= datetime(day.year, day.month, day.day),
+            )
+            .distinct()
+        )
+    ).scalars()
+    return set(rows)
+
+
+async def audience_contacts(
+    session: AsyncSession, broadcast: Broadcast, enforce_opt_in: bool = True
+) -> list[Contact]:
     """Los contactos que hoy cumplen el criterio (uno por telefono)."""
     category = await template_category(session, broadcast.app_id, broadcast.template_name, broadcast.template_language)
     marketing = (category or "").upper() == "MARKETING"
@@ -168,6 +196,7 @@ async def audience_contacts(session: AsyncSession, broadcast: Broadcast) -> list
     audience = broadcast.audience or {}
     received = await _contacts_that_received(session, broadcast.app_id, audience.get("received_templates"))
     not_received = await _contacts_that_received(session, broadcast.app_id, audience.get("not_received_templates"))
+    wrote = await _contacts_that_wrote(session, broadcast.app_id, audience.get("wrote_since"))
 
     seen: set[str] = set()
     result: list[Contact] = []
@@ -178,12 +207,14 @@ async def audience_contacts(session: AsyncSession, broadcast: Broadcast) -> list
             continue
         if not_received is not None and contact.id in not_received:
             continue
+        if wrote is not None and contact.id not in wrote:
+            continue
         # Uno sin negocio ("" del numero compartido) es de este salon solo
         # si el salon lo publico como suyo (PUT /v1/contacts/bulk).
         if broadcast.business_id and contact.business_id != broadcast.business_id:
             if (contact.fields or {}).get("negocio") != broadcast.business_id:
                 continue
-        if matches(contact, broadcast.audience or {}, marketing):
+        if matches(contact, broadcast.audience or {}, marketing, enforce_opt_in):
             seen.add(contact.phone)
             result.append(contact)
     return result
